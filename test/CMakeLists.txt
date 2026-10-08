@@ -69,10 +69,14 @@ mcp_configure_target(mcp-server-demo)
 #-----------------------------------------------------------------------------------------------------------------------
 
 set(MCP_TESTS
+        SessionIdTest
+        ListenerMessageTest
+        ToolHttpFramingTest
 )
 
 set(MCP_TEST_SOURCES
         oatpp-mcp/tests.cpp
+        oatpp-mcp/tests/TestChecks.hpp
 )
 
 foreach(MCP_TEST ${MCP_TESTS})
