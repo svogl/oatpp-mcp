@@ -38,6 +38,12 @@ public:
 private:
   void closeNonBlocking();
 private:
+  /**
+   * Random identifier, generated once per session. Never derived from the object, its address, a
+   * counter or a timestamp - see oatpp::mcp::utils::Uuid and SECURITY-FINDINGS.md (F2).
+   */
+  oatpp::String m_id;
+private:
   std::shared_ptr<Pinger> m_pinger;
   std::shared_ptr<EventStream> m_inStream;
   std::shared_ptr<EventStream> m_outStream;
@@ -76,6 +82,15 @@ public:
 
   void close();
 
+  /**
+   * The session identifier - a random version-4 UUID, stable for the lifetime of the session.
+   *
+   * This value is what clients address in <code>POST /sessions/{sessionId}</code>, and the SSE
+   * endpoints authenticate nothing (SECURITY-FINDINGS.md, F4), so it is the only thing standing
+   * between one client and another client's message stream. It must be unguessable, and it must
+   * not be derivable from anything the server otherwise reveals.
+   * @return 36 characters, canonical UUID form.
+   */
   oatpp::String getId() const;
 
 };

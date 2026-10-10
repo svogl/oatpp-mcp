@@ -19,6 +19,14 @@ std::shared_ptr<Session> Server::startNewSession(const std::shared_ptr<Session::
   auto session = std::make_shared<Session>(m_pinger);
   {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if(m_sessions.find(session->getId()) != m_sessions.end()) {
+      /* Identifiers are random 122-bit values, so this is not a race to be handled - it is the
+       * identifier generator having stopped being random, which is finding F2 and must not be
+       * papered over by quietly overwriting the session that got there first. */
+      OATPP_LOGe("[oatpp::mcp::Server::startNewSession()]",
+                 "Error - session identifier collision, identifiers are not unique: {}",
+                 session->getId())
+    }
     m_sessions[session->getId()] = session;
   }
 
@@ -28,7 +36,12 @@ std::shared_ptr<Session> Server::startNewSession(const std::shared_ptr<Session::
     session->listen(listener);
     {
       std::lock_guard<std::mutex> lock(m_mutex);
-      m_sessions.erase(session->getId());
+      auto it = m_sessions.find(session->getId());
+      /* Only remove our own entry: if an identifier were ever shared, the first session to finish
+       * must not retire the session that replaced it. */
+      if(it != m_sessions.end() && it->second == session) {
+        m_sessions.erase(it);
+      }
       OATPP_LOGd("Server", "sessions count={}", m_sessions.size())
     }
   });

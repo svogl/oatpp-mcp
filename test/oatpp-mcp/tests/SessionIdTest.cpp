@@ -18,38 +18,7 @@ public:
   void onEvent(oatpp::mcp::event::Session&, const oatpp::mcp::event::Event&) override {}
 };
 
-static bool isHexDigit(char c) {
-  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
-
-/**
- * Canonical 8-4-4-4-12 form, version 4, variant 10xx (RFC 4122). Hex case is not constrained.
- */
-static bool isUuidV4(const oatpp::String& value) {
-  if(value == nullptr || value->size() != 36) {
-    return false;
-  }
-  const char* s = value->c_str();
-  static const int hyphens[4] = {8, 13, 18, 23};
-  for(int i = 0; i < 36; i++) {
-    bool isHyphen = false;
-    for(int h = 0; h < 4; h++) {
-      isHyphen = isHyphen || (i == hyphens[h]);
-    }
-    if(isHyphen) {
-      if(s[i] != '-') {
-        return false;
-      }
-    } else if(!isHexDigit(s[i])) {
-      return false;
-    }
-  }
-  if(s[14] != '4') {
-    return false; // version
-  }
-  return s[19] == '8' || s[19] == '9' || s[19] == 'a' || s[19] == 'b'
-      || s[19] == 'A' || s[19] == 'B';                    // variant
-}
+/* isUuidV4() lives in TestChecks.hpp - the generator itself is tested directly by UuidTest. */
 
 /** Longest common prefix of two identifiers. */
 static size_t commonPrefix(const std::string& a, const std::string& b) {

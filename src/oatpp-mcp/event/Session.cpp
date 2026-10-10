@@ -3,13 +3,14 @@
 //
 
 #include "Session.hpp"
-#include "oatpp/utils/Conversion.hpp"
+#include "oatpp-mcp/utils/Uuid.hpp"
 #include "oatpp/base/Log.hpp"
 
 namespace oatpp { namespace mcp { namespace event {
 
 Session::Session(const std::shared_ptr<Pinger>& pinger)
-  : m_pinger(pinger)
+  : m_id(utils::Uuid::generateV4())
+  , m_pinger(pinger)
   , m_inStream(std::make_shared<EventStream>())
   , m_outStream(std::make_shared<EventStream>())
   , m_open(true)
@@ -74,8 +75,7 @@ void Session::close() {
 }
 
 oatpp::String Session::getId() const {
-  auto memId = reinterpret_cast<v_uint64>(this);
-  return oatpp::utils::Conversion::uint64ToStr(memId);
+  return m_id;
 }
 
 }}}

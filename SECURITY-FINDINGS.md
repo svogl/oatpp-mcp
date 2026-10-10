@@ -12,7 +12,7 @@ by running the code, not by reading it.
 | ID | Finding | Severity | Status | Test |
 |----|---------|----------|--------|------|
 | [F1](#f1--request-smuggling-via-tool-arguments) | Request smuggling via tool arguments | High | **fixed** | `HttpSanitizeTest`, `ToolHttpFramingTest` |
-| [F2](#f2--session-identifiers-are-heap-addresses) | Session identifiers are heap addresses | High | **open — reproduced** | `SessionIdTest` |
+| [F2](#f2--session-identifiers-are-heap-addresses) | Session identifiers are heap addresses | High | **fixed** | `UuidTest`, `SessionIdTest` |
 | [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **open — reproduced** | `ListenerMessageTest` |
 | [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | open | — |
 | [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | open | — |
@@ -137,10 +137,47 @@ predicted the identifier of the next client, and can then POST messages to it �
 /mcp/sessions/{sessionId}` authenticates nothing (F4), so those messages are delivered to the
 victim's SSE stream.
 
-**Fix.** Generate a random version-4 UUID once, in the `Session` constructor, and return it from
-`getId()`. Use `std::random_device` directly — **not** `oatpp::utils::Random`, which is
-`std::mt19937` and not cryptographically random. Identifiers must be stable across calls and must
-not be derived from anything an attacker can observe.
+**Fix — landed.** `src/oatpp-mcp/utils/Uuid.{hpp,cpp}`, used from the `Session` constructor:
+`m_id` is generated once and `getId()` returns it, so the identifier is stable for the lifetime of
+the session and outlives nothing that could have been derived from the object.
+
+| decision | what was chosen | why |
+|---|---|---|
+| format | UUID v4, canonical 8-4-4-4-12 lowercase, 122 random bits | a standard shape clients already handle, and a length that makes "is this an address?" a category error |
+| entropy | `std::random_device` directly | **not** `oatpp::utils::Random` — that is `std::mt19937`, whose state is recoverable from its output; fine for shuffling, wrong for a capability |
+| lifetime of the source | one process-wide source, allocated once, never destroyed | sessions run on detached threads that can call this during shutdown, after function-local statics are gone; a mutex destroyed under a waiting thread is worse than bytes the loader never reclaims |
+| thread safety | mutex around `operator()` | the standard does not require `std::random_device::operator()` to be thread-safe on one object, and sessions are created on whichever thread served the request |
+| entropy source unavailable | the exception propagates; no fallback | an identifier that is not random is the vulnerability itself. Failing to open a session is recoverable; failing silently is not |
+| `random_device::entropy()` | deliberately **not** consulted | libc++ documents it as always returning 0, so a warning keyed on it is noise on exactly the platforms that are fine. It informs nothing; the source either works or throws |
+
+Two supporting changes in `event/Server.cpp`, both about the same invariant:
+
+- `startNewSession()` logs an error if an identifier is already in the registry. With 122 random
+  bits this is not a race to be handled — it is the generator having stopped being random, and it
+  must not be papered over by overwriting the session that got there first.
+- the session's cleanup erases its registry entry **only if it is still its own**, so that if two
+  sessions ever did share an identifier, the first to finish could not retire the second.
+
+**Verified after the fix.** `UuidTest` 11/11 (format, lowercase, no repeats in 20 000 draws, no
+long common prefix, every hex digit seen in the leading position, 10 000 draws from 4 threads all
+distinct) and `SessionIdTest` 7/7 (identifier is not the object address, no reissue across 200
+create/close cycles, longest common prefix ≤ 8). End-to-end against the demo server, the churn that
+used to produce `unique=1 of 200` now produces 15 distinct identifiers out of 15 sequential SSE
+connections, all canonical v4, longest common prefix 2:
+
+```
+56afe4ae-f74f-450f-922d-9ec6f4fc06b6   cfb8ba8b-d856-4a9a-bc8a-eac4d5aa99bc
+63d097af-22b2-4a25-9e34-38a896ffc228   a635945e-661b-4a16-9ba0-305320814123
+```
+
+The SSE round-trip is unaffected: `tools/list` and `tools/call` still complete on a session
+addressed by its UUID, and the F1 smuggling payload still produces one encoded request and one
+controller call.
+
+**What this does not fix.** The identifier is now unguessable, but the endpoints still authenticate
+nothing else: no Origin/Host check, no peer binding, and an unknown identifier is still answered
+`200 OK` rather than `404` — see F4. A random identifier raises the cost of hijacking a session from
+"open a session and wait" to "guess 122 bits"; it does not make the session *authorized*.
 
 ---
 
@@ -273,7 +310,7 @@ are the second line of defence.
 | B2 | reject CR/LF/NUL in the request target before writing the request line | `web/protocol/http/outgoing/Request.cpp` |
 | B3 | add `Pattern::reconstructEncoded()`; leave `reconstruct()` alone so existing callers do not double-encode | `web/url/mapping/Pattern.{hpp,cpp}` |
 | B4 | `RequestHeadersReader::readHeadersSectionIterative()` sets the buffer position to the end of the peeked chunk instead of to the section end, so the header parse is handed bytes past `\r\n\r\n`. Benign today because `Parser::parseHeaders()` stops at the blank line | `web/protocol/http/incoming/RequestHeadersReader.cpp` |
-| B5 | a CSPRNG-backed UUID helper, so modules stop hand-rolling identifiers from `std::mt19937` | new `utils/Uuid.hpp` |
+| B5 | a CSPRNG-backed UUID helper, so modules stop hand-rolling identifiers from `std::mt19937`. `oatpp::utils::Random` is `std::mt19937` and is not a candidate for identifiers; `oatpp-mcp` grew its own (`utils/Uuid.{hpp,cpp}`, see F2) which is a suitable starting point if upstream wants one | new `utils/Uuid.hpp` |
 | B6 | **percent-decode what was encoded.** `Url::Parser::parseQueryParams()` splits on `&`/`=` and hands out raw labels; path-variable labels are raw too; `encoding::Url::decode()` is never called anywhere in the library. A correctly-encoded request therefore delivers `%20` to the endpoint | `network/Url.cpp`, `web/protocol/http/incoming/Request.cpp` |
 | B7 | `Executor::~Executor() = default` while workers own joinable threads — destroying a stopped-but-not-joined executor is `std::terminate` | `async/Executor.hpp` |
 

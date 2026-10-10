@@ -15,6 +15,7 @@
 #include "oatpp-mcp/tests/ListenerMessageTest.hpp"
 #include "oatpp-mcp/tests/SessionIdTest.hpp"
 #include "oatpp-mcp/tests/ToolHttpFramingTest.hpp"
+#include "oatpp-mcp/tests/UuidTest.hpp"
 
 #include "oatpp/Environment.hpp"
 #include "oatpp/base/Log.hpp"
@@ -49,6 +50,14 @@ static std::vector<TestDescriptor> tests() {
       nullptr,
       [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
         std::make_shared<oatpp::mcp::test::HttpSanitizeTest>()); }
+    },
+    TestDescriptor{
+      "UuidTest",
+      "TEST[mcp::Uuid]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::UuidTest>()); }
     },
     TestDescriptor{
       "SessionIdTest",

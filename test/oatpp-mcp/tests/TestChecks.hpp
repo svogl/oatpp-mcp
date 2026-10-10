@@ -86,6 +86,39 @@ static inline std::string str(const oatpp::String& value) {
 }
 
 /**
+ * Canonical 8-4-4-4-12 form, version 4, variant 10xx (RFC 4122). Hex case is not constrained.
+ */
+static inline bool isUuidV4(const oatpp::String& value) {
+  if(value == nullptr || value->size() != 36) {
+    return false;
+  }
+  const char* s = value->c_str();
+  static const int hyphens[4] = {8, 13, 18, 23};
+  auto hexDigit = [](char c) {
+    // not isxdigit(): locale-dependent, and it accepts more than RFC 4122 does
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+  };
+  for(int i = 0; i < 36; i++) {
+    bool isHyphen = false;
+    for(int h = 0; h < 4; h++) {
+      isHyphen = isHyphen || (i == hyphens[h]);
+    }
+    if(isHyphen) {
+      if(s[i] != '-') {
+        return false;
+      }
+    } else if(!hexDigit(s[i])) {
+      return false;
+    }
+  }
+  if(s[14] != '4') {
+    return false; // version
+  }
+  return s[19] == '8' || s[19] == '9' || s[19] == 'a' || s[19] == 'b'
+      || s[19] == 'A' || s[19] == 'B';                    // variant
+}
+
+/**
  * Printable form of a string with control characters escaped, so that a test failure involving
  * CR/LF injection says what actually happened instead of drawing a line break.
  */
