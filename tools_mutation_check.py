@@ -28,6 +28,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.join(ROOT, "build")
 
 LISTENER = "src/oatpp-mcp/Listener.cpp"
+LOGSAFE = "src/oatpp-mcp/utils/LogSafe.cpp"
 SESSION = "src/oatpp-mcp/event/Session.cpp"
 
 # ---------------------------------------------------------------------------------------------
@@ -35,7 +36,8 @@ SESSION = "src/oatpp-mcp/event/Session.cpp"
 # ---------------------------------------------------------------------------------------------
 
 PARSE_CATCH = """  } catch (const std::exception& e) {
-    OATPP_LOGw("Listener", "[{}] undecodable message: {}", session.getId(), e.what())
+    OATPP_LOGw("Listener", "[{}] undecodable message: {}", session.getId(),
+               utils::LogSafe::text(e.what()))
     /* No id could be read, so the error goes out with a null id - JSON-RPC §5. */
     sendRpcError(session, nullptr, rpc_error::ParseError, "Parse error");
     return;
@@ -128,6 +130,50 @@ MUTATIONS = [
     ("F3: initialize remap is not wrapped", LISTENER, handler_remap("initialize", "ClientParamsInitialize"),
      "  // mutated", "ListenerMessageTest"),
 
+    # -------------------------------------------------------------------------------------------
+    # F6 - attacker-controlled text in info-level logs
+    # -------------------------------------------------------------------------------------------
+
+    ("F6: the resolved request target is logged at info", LOGSAFE,
+     '  OATPP_LOGd(tag, "request target:', '  OATPP_LOGi(tag, "request target:', "ToolLoggingTest"),
+
+    ("F6: header values are logged at info", LOGSAFE,
+     '  OATPP_LOGd(tag, "header:', '  OATPP_LOGi(tag, "header:', "ToolLoggingTest"),
+
+    ("F6: the request body is logged at info", LOGSAFE,
+     '  OATPP_LOGd(tag, "body:', '  OATPP_LOGi(tag, "body:', "ToolLoggingTest"),
+
+    ("F6: the endpoint line is not rendered", LOGSAFE,
+     """  OATPP_LOGi(tag, "tool '{}': {} {}", text(endpointName), text(method), text(pathPattern))""",
+     """  OATPP_LOGi(tag, "tool '{}': {} {}", endpointName, method, pathPattern)""",
+     "ToolLoggingTest"),
+
+    ("F6: CR, LF and TAB are not escaped", LOGSAFE,
+     r"""    case '\r': out += "\\r"; return;
+    case '\n': out += "\\n"; return;
+    case '\t': out += "\\t"; return;""",
+     "    // mutated", "LogSafeTest"),
+
+    ("F6: the remaining control characters are not escaped", LOGSAFE,
+     "  if(byte < 0x20 || byte == 0x7F) {", "  if(false) {", "LogSafeTest"),
+
+    ("F6: header values are not redacted", LOGSAFE,
+     "  if(isSensitiveName(name)) {", "  if(false) {", "LogSafeTest"),
+
+    ("F6: query parameter values are not redacted", LOGSAFE,
+     "if(equals != std::string::npos && isSensitiveLowered(lowered(part.substr(0, equals)))) {",
+     "if(false) {", "LogSafeTest"),
+
+    ("F6: values are not truncated", LOGSAFE,
+     "  const v_buff_size cut = cutIndex(value, maxLength);",
+     "  const v_buff_size cut = static_cast<v_buff_size>(value.size());", "LogSafeTest"),
+
+    ("F6: a cut may land inside a multi-byte character", LOGSAFE,
+     """  while(i > 0 && i < size && isUtf8Continuation(value[i])) {
+    i --;
+  }""",
+     "  // mutated", "LogSafeTest"),
+
     ("F3: session thread does not guard the listener call", SESSION, LISTEN_GUARD,
      """    {
       auto event = m_inStream->read(std::chrono::milliseconds(5000));
@@ -141,7 +187,14 @@ MUTATIONS = [
 
 
 def run(argv):
-    return subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    """
+    Run a command and collect its output.
+
+    `errors="replace"` is not a courtesy: a failing test prints the values it was given, and one of
+    those values is deliberately a cut multi-byte character. Decoding strictly kills this tool while
+    it is holding a mutated working tree, which is the worst possible moment to crash.
+    """
+    return subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, errors="replace")
 
 
 def build():

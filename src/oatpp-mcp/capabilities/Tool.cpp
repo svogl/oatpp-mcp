@@ -6,6 +6,7 @@
 
 #include "oatpp-mcp/capabilities/Utils.hpp"
 #include "oatpp-mcp/utils/HttpSanitize.hpp"
+#include "oatpp-mcp/utils/LogSafe.hpp"
 
 #include "oatpp/web/protocol/http/outgoing/BufferBody.hpp"
 #include "oatpp/base/Log.hpp"
@@ -181,12 +182,8 @@ oatpp::Object<dto::ServerResultToolsCall> EndpointTool::call(const oatpp::String
   auto path = prepareEndpointPath(stringArgs, error);
   auto headers = prepareEndpointHeaders(stringArgs, error);
 
-  OATPP_LOGi("EndpointTool::call", "method: {}, path: '{}'", m_endpoint->info()->method, path)
-  for(auto& h : headers.getAll()) {
-    OATPP_LOGi("EndpointTool::call", "Header: {}: '{}'", h.first.toString(), h.second.toString())
-  }
-
   std::shared_ptr<oatpp::web::protocol::http::outgoing::Body> body;
+  oatpp::String bodyContent;
   auto bodyIt = stringArgs.find(m_endpoint->info()->body.name);
   if(bodyIt != stringArgs.end()) {
     auto& bodyTree = args[m_endpoint->info()->body.name];
@@ -198,8 +195,23 @@ oatpp::Object<dto::ServerResultToolsCall> EndpointTool::call(const oatpp::String
       content = mapper->writeToString(polymorph);
     }
     body = std::make_shared<oatpp::web::protocol::http::outgoing::BufferBody>(content, "application/json");
-    OATPP_LOGd("[oatpp::mcp::capabilities::EndpointTool::call()]", "body content='{}'", content)
+    bodyContent = content;
   }
+
+  /*
+   * One renderer for everything this method logs. The resolved target, the headers and the body are
+   * text the tool caller chose, so they are debug-only, escaped and bounded, and the values that
+   * name a credential are replaced. F1's encoding already keeps framing characters out of the
+   * request target; this is the other half - the level, the length, the header values, and not
+   * letting a tool argument start a second log line. See SECURITY-FINDINGS.md, F6.
+   */
+  utils::LogSafe::logRequest("EndpointTool::call",
+                             m_endpoint->info()->name,
+                             m_endpoint->info()->method,
+                             m_endpoint->info()->path,
+                             path,
+                             headers,
+                             bodyContent);
 
   auto response = m_components.apiBridge->getHttpExecutor()->execute(
     m_endpoint->info()->method,

@@ -27,6 +27,8 @@ add_library(${OATPP_THIS_MODULE_NAME}
         oatpp-mcp/utils/ApiBridge.hpp
         oatpp-mcp/utils/HttpSanitize.cpp
         oatpp-mcp/utils/HttpSanitize.hpp
+        oatpp-mcp/utils/LogSafe.cpp
+        oatpp-mcp/utils/LogSafe.hpp
         oatpp-mcp/utils/Uuid.cpp
         oatpp-mcp/utils/Uuid.hpp
         oatpp-mcp/utils/JsonSchema.cpp

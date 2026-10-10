@@ -5,9 +5,17 @@
 #include "Listener.hpp"
 
 #include "capabilities/Utils.hpp"
+#include "utils/LogSafe.hpp"
 
 #include "oatpp/utils/Conversion.hpp"
 #include "oatpp/base/Log.hpp"
+
+/*
+ * Every value below that a remote client influenced - a message body, a method name, a tool name,
+ * the text of an exception thrown while handling any of them - is rendered through
+ * {@link oatpp::mcp::utils::LogSafe} before it reaches a log statement. Session identifiers are
+ * server-generated and format-constrained, so they go as they are. See SECURITY-FINDINGS.md, F6.
+ */
 
 namespace {
 
@@ -132,7 +140,8 @@ void Listener::sendRpcError(event::Session& session, const oatpp::Any& id, v_int
 void Listener::sendInvalidParams(event::Session& session, const oatpp::Object<dto::RpcCall>& call,
                                  const char* method, const char* detail)
 {
-  OATPP_LOGw("Listener", "[{}] rejected parameters for {}: {}", session.getId(), method, detail)
+  OATPP_LOGw("Listener", "[{}] rejected parameters for {}: {}", session.getId(), method,
+             utils::LogSafe::text(detail))
   sendRpcError(session, call->id, rpc_error::InvalidParams, "Invalid params");
 }
 
@@ -188,7 +197,8 @@ void Listener::promptsGet(event::Session& session, const oatpp::Object<dto::RpcC
       rpcResult->result = m_remapper.remap<oatpp::Tree>(result);
     } catch (const std::exception& e) {
       /* The detail is logged, not sent: see sendInvalidParams(). */
-      OATPP_LOGe("[oatpp::mcp::Listener::promptsGet()]", "Error - prompt handler threw: {}", e.what())
+      OATPP_LOGe("[oatpp::mcp::Listener::promptsGet()]", "Error - prompt handler threw: {}",
+                 utils::LogSafe::text(e.what()))
       oatpp::data::mapping::Tree error;
       error["code"] = rpc_error::InternalError;
       error["message"] = "Internal error";
@@ -276,7 +286,7 @@ void Listener::toolsCall(event::Session& session, const oatpp::Object<dto::RpcCa
        * builds itself, not in whatever an exception happened to carry.
        */
       OATPP_LOGe("[oatpp::mcp::Listener::toolsCall()]", "Error - tool '{}' threw: {}",
-                 *callParams->name, e.what())
+                 utils::LogSafe::text(callParams->name), utils::LogSafe::text(e.what()))
       auto result = dto::ServerResultToolsCall::createShared();
       result->isError = true;
       result->content = {
@@ -285,7 +295,7 @@ void Listener::toolsCall(event::Session& session, const oatpp::Object<dto::RpcCa
       rpcResult->result = m_remapper.remap<oatpp::Tree>(result);
     } catch (...) {
       OATPP_LOGe("[oatpp::mcp::Listener::toolsCall()]", "Error - tool '{}' threw an unknown exception",
-                 *callParams->name)
+                 utils::LogSafe::text(callParams->name))
       auto result = dto::ServerResultToolsCall::createShared();
       result->isError = true;
       result->content = {
@@ -428,7 +438,8 @@ void Listener::resourcesRead(event::Session& session, const oatpp::Object<dto::R
         auto result = route.getEndpoint()->call(session.getId(), route);
         rpcResult->result = m_remapper.remap<oatpp::Tree>(result);
       } catch (const std::exception& e) {
-        OATPP_LOGe("[oatpp::mcp::Listener::resourcesRead()]", "Error - resource handler threw: {}", e.what())
+        OATPP_LOGe("[oatpp::mcp::Listener::resourcesRead()]", "Error - resource handler threw: {}",
+                   utils::LogSafe::text(e.what()))
         oatpp::data::mapping::Tree error;
         error["code"] = rpc_error::InternalError;
         error["message"] = "Internal error";
@@ -465,7 +476,8 @@ void Listener::handleCall(event::Session& session, const event::Event& event) {
   try {
     parsed = m_mapper.readFromString<oatpp::Tree>(event.data);
   } catch (const std::exception& e) {
-    OATPP_LOGw("Listener", "[{}] undecodable message: {}", session.getId(), e.what())
+    OATPP_LOGw("Listener", "[{}] undecodable message: {}", session.getId(),
+               utils::LogSafe::text(e.what()))
     /* No id could be read, so the error goes out with a null id - JSON-RPC §5. */
     sendRpcError(session, nullptr, rpc_error::ParseError, "Parse error");
     return;
@@ -498,7 +510,8 @@ void Listener::handleCall(event::Session& session, const event::Event& event) {
     try {
       id = m_remapper.remap<oatpp::Any>(idNode);
     } catch (const std::exception& e) {
-      OATPP_LOGw("Listener", "[{}] unreadable message id: {}", session.getId(), e.what())
+      OATPP_LOGw("Listener", "[{}] unreadable message id: {}", session.getId(),
+                 utils::LogSafe::text(e.what()))
       sendRpcError(session, nullptr, rpc_error::InvalidRequest,
                    "Invalid request: 'id' must be a string or a number");
       return;
@@ -535,7 +548,8 @@ void Listener::handleCall(event::Session& session, const event::Event& event) {
   try {
     call = m_remapper.remap<oatpp::Object<dto::RpcCall>>(parsed);
   } catch (const std::exception& e) {
-    OATPP_LOGw("Listener", "[{}] message does not fit a JSON-RPC call: {}", session.getId(), e.what())
+    OATPP_LOGw("Listener", "[{}] message does not fit a JSON-RPC call: {}", session.getId(),
+               utils::LogSafe::text(e.what()))
     sendRpcError(session, id, rpc_error::InvalidRequest, "Invalid request");
     return;
   }
@@ -582,14 +596,22 @@ void Listener::handleCall(event::Session& session, const event::Event& event) {
     sendRpcError(session, id, rpc_error::MethodNotFound, oatpp::String("Method not found: ") + method);
   } else {
     /* A notification - no id, therefore nothing may be answered. */
-    OATPP_LOGd("Listener", "[{}] ignored notification for unknown method: {}", session.getId(), method)
+    OATPP_LOGd("Listener", "[{}] ignored notification for unknown method: {}", session.getId(),
+               utils::LogSafe::text(method))
   }
 
 }
 
 void Listener::onEvent(event::Session& session, const event::Event& event) {
 
-  OATPP_LOGd("Event", "[{}] --> : {}", session.getId(), event.data)
+  /*
+   * The whole message, exactly as it arrived, at debug: this is the line an operator reads when a
+   * client says the server ignored it. It is also the most attacker-shaped string in the process -
+   * a message does not have to be valid JSON to reach here, and a newline in it used to appear as a
+   * log record this server had written about a session it never had.
+   */
+  OATPP_LOGd("Event", "[{}] --> : {}", session.getId(),
+             utils::LogSafe::text(event.data, utils::LogSafe::MaxMessageLength))
 
   /*
    * This runs on the session's own detached thread. An exception that leaves this function reaches
@@ -604,7 +626,7 @@ void Listener::onEvent(event::Session& session, const event::Event& event) {
     handleCall(session, event);
   } catch (const std::exception& e) {
     OATPP_LOGe("[oatpp::mcp::Listener::onEvent()]", "Error - unhandled exception while processing a "
-               "message for session {}: {}", session.getId(), e.what())
+               "message for session {}: {}", session.getId(), utils::LogSafe::text(e.what()))
   } catch (...) {
     OATPP_LOGe("[oatpp::mcp::Listener::onEvent()]", "Error - unknown exception while processing a "
                "message for session {}", session.getId())

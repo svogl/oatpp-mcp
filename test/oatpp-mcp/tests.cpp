@@ -13,8 +13,10 @@
 
 #include "oatpp-mcp/tests/HttpSanitizeTest.hpp"
 #include "oatpp-mcp/tests/ListenerMessageTest.hpp"
+#include "oatpp-mcp/tests/LogSafeTest.hpp"
 #include "oatpp-mcp/tests/SessionIdTest.hpp"
 #include "oatpp-mcp/tests/ToolHttpFramingTest.hpp"
+#include "oatpp-mcp/tests/ToolLoggingTest.hpp"
 #include "oatpp-mcp/tests/UuidTest.hpp"
 
 #include "oatpp/Environment.hpp"
@@ -52,6 +54,14 @@ static std::vector<TestDescriptor> tests() {
         std::make_shared<oatpp::mcp::test::HttpSanitizeTest>()); }
     },
     TestDescriptor{
+      "LogSafeTest",
+      "TEST[mcp::LogSafe]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::LogSafeTest>()); }
+    },
+    TestDescriptor{
       "UuidTest",
       "TEST[mcp::Uuid]",
       true,
@@ -83,6 +93,14 @@ static std::vector<TestDescriptor> tests() {
       "bridge and the objects it owns outlive the test. See SECURITY-FINDINGS.md (F7).",
       [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
         std::make_shared<oatpp::mcp::test::ToolHttpFramingTest>()); }
+    },
+    TestDescriptor{
+      "ToolLoggingTest",
+      "TEST[mcp::ToolLogging]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::ToolLoggingTest>()); }
     },
   };
 }

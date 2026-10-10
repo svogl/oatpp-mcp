@@ -16,7 +16,7 @@ by running the code, not by reading it.
 | [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **fixed** | `ListenerMessageTest` |
 | [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | open | — |
 | [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | open | — |
-| [F6](#f6--attacker-controlled-text-in-info-level-logs) | Attacker-controlled text in info-level logs | Medium | open | — |
+| [F6](#f6--attacker-controlled-text-in-info-level-logs) | Attacker-controlled text in info-level logs | Medium | **fixed** | `LogSafeTest`, `ToolLoggingTest` |
 | [F7](#f7--apibridge-cannot-be-stopped) | `ApiBridge` cannot be stopped | Medium | open | — |
 | [F8](#f8--dropped-events-are-silent) | Dropped events are silent | Low | open | — |
 | [F9](#f9--capability-registries-are-not-thread-safe) | Capability registries are not thread safe | Low | open | — |
@@ -53,7 +53,7 @@ python3 tools_mutation_check.py --only 7
 ```
 
 It edits the working tree and rebuilds, so do not `git commit` while it runs. It currently covers
-F3 (13 mutations, all caught); extending it to the F1 and F2 decisions is task **T6.1**.
+F3 and F6 (23 mutations, all caught); extending it to the F1 and F2 decisions is task **T6.1**.
 
 ---
 
@@ -306,12 +306,58 @@ of a blocked worker.
 
 ## F6 — attacker-controlled text in info-level logs
 
-**Where:** `src/oatpp-mcp/capabilities/Tool.cpp` — `OATPP_LOGi` prints the full request path, every
-header value and (at debug level) the request body.
+**Where:** `src/oatpp-mcp/capabilities/Tool.cpp` — `OATPP_LOGi` printed the resolved request path and
+every header value, and the request body went out at debug. The same habit was still in
+`Listener::onEvent()` and `sse::ReadCallback::waitEvent()`, which log whole messages.
 
-Two problems: credentials and PII end up in logs, and the text is not sanitized, so a `\n` in an
-argument forges log lines — the F1 payload does this on every invocation. **Fix:** log at debug,
-truncate, and escape control characters.
+Two problems, and they do not pull the same way:
+
+- **a log is where secrets go to leak.** `Authorization` was just another header name among the ones
+  an endpoint declares, and info is the level that is on by default and shipped somewhere else;
+- **a log is a line-oriented sink.** A `\n` in anything written to it begins a new record — carrying
+  this server's own timestamp and tag, which is exactly what makes it worth forging.
+
+**Verified.** Forging a record did not need the F1 payload, and does not need the request to be
+valid — a message is logged before the parser rejects it:
+
+```
+POST /mcp/sessions/<id>     body: "GARBAGE\n2026-10-11 00:00:00 FORGED RECORD from a tool client\n"
+
+ D |...| Event:[<session>] --> : GARBAGE
+ 2026-10-11 00:00:00 FORGED RECORD from a tool client     <- not a record; a grep for a date says it is
+```
+
+(The F1 payload forged records through the resolved path too; encoding the arguments for F1 closed
+that route and left this one.)
+
+**Fix — landed.** `src/oatpp-mcp/utils/LogSafe.{hpp,cpp}`, used from `EndpointTool::call`,
+`Listener` and `sse::ReadCallback`.
+
+| decision | what was chosen | why |
+|---|---|---|
+| level | one info line per tool call naming the endpoint, its method and its **path pattern**; the resolved target, the headers and the body at debug | "which tool ran" is the operator's question — with a proxy blocking tools it is also the security question — so it survives the default level; what the caller sent does not need to |
+| control characters | `\r`, `\n` and `\t` keep a readable two-character form; every other C0 control and DEL becomes `\xNN`; bytes >= 0x80 pass through | one record per input line, and the record still says what was in it — including text that is not ASCII |
+| length | 1 KiB per value, 2 KiB per message, then `...[+N bytes]` | the budget is measured in *rendered* bytes, because that is what a log line has to stay inside; what was dropped is reported rather than hidden, and the cut never lands inside a multi-byte character |
+| credentials | header values, and query-parameter values, whose name matches a known credential name become `<redacted>` | an escaped password is still a password; the name stays, because "which credential" is a fair question and "what was it" is not |
+| scope | every value that reaches a log statement goes through this, including the developer-supplied endpoint name and path pattern | "nothing unrendered reaches the log" is then a property of the code, not of a list of call sites somebody decided were dangerous |
+
+Redaction is best effort — it knows the common names, not this deployment's — and it is deliberately
+not applied to bodies: a body is what somebody turned on debug logging to look at, and debug-only is
+the control that was missing.
+
+**Verified after the fix.** `LogSafeTest` 81/81 and `ToolLoggingTest` 26/26. The same POST is now one
+record, and a tool call says what it ran without saying what it was sent:
+
+```
+ D |...| Event:[<session>] --> : GARBAGE\n2026-10-11 00:00:00 FORGED RECORD from a tool client\n...
+
+ I |...| EndpointTool::call:tool 'getUsers': GET users/offset/{offset}/limit/{limit}/*
+ D |...| EndpointTool::call:request target: '/users/offset/1/limit/1/?searchPhrase=x%20HTTP%2F1.1%0D%0A…'
+```
+
+Ten F6 decisions are in `tools_mutation_check.py` — log a value at info, stop escaping, stop
+redacting a header or a query parameter, stop truncating, cut inside a multi-byte character — all
+caught.
 
 ## F7 — `ApiBridge` cannot be stopped
 
