@@ -45,12 +45,31 @@ void Session::listen(std::shared_ptr<EventListener> listener) {
   }
 
   while (isOpen()) {
-    auto event = m_inStream->read(std::chrono::milliseconds(5000));
-    if(event) {
-      listener->onEvent(*this, event);
-    } else if (m_pinger) {
-      m_pinger->onPing(*this);
+
+    /*
+     * This is the body of a detached thread, and an exception escaping it is std::terminate for the
+     * whole process - and, short of that, the session would never be removed from its server's
+     * registry. A listener is extension code, so "it cannot throw" is not a property of this
+     * library. Log, drop the message, keep the session: one bad event is not a reason to hang up on
+     * a client. See SECURITY-FINDINGS.md, finding F3.
+     */
+    try {
+
+      auto event = m_inStream->read(std::chrono::milliseconds(5000));
+      if(event) {
+        listener->onEvent(*this, event);
+      } else if (m_pinger) {
+        m_pinger->onPing(*this);
+      }
+
+    } catch (const std::exception& e) {
+      OATPP_LOGe("[oatpp::mcp::Session::listen()]",
+                 "Error - listener threw for session {}, continuing: {}", m_id, e.what())
+    } catch (...) {
+      OATPP_LOGe("[oatpp::mcp::Session::listen()]",
+                 "Error - listener threw an unknown exception for session {}, continuing", m_id)
     }
+
   }
 
 }

@@ -13,7 +13,7 @@ by running the code, not by reading it.
 |----|---------|----------|--------|------|
 | [F1](#f1--request-smuggling-via-tool-arguments) | Request smuggling via tool arguments | High | **fixed** | `HttpSanitizeTest`, `ToolHttpFramingTest` |
 | [F2](#f2--session-identifiers-are-heap-addresses) | Session identifiers are heap addresses | High | **fixed** | `UuidTest`, `SessionIdTest` |
-| [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **open — reproduced** | `ListenerMessageTest` |
+| [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **fixed** | `ListenerMessageTest` |
 | [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | open | — |
 | [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | open | — |
 | [F6](#f6--attacker-controlled-text-in-info-level-logs) | Attacker-controlled text in info-level logs | Medium | open | — |
@@ -21,6 +21,7 @@ by running the code, not by reading it.
 | [F8](#f8--dropped-events-are-silent) | Dropped events are silent | Low | open | — |
 | [F9](#f9--capability-registries-are-not-thread-safe) | Capability registries are not thread safe | Low | open | — |
 | [F10](#f10--no-body-size-limit-and-no-rate-limiting) | No body size limit, no rate limiting | Low | open | — |
+| [F11](#f11--a-notification-with-a-known-method-is-answered) | A notification with a known method is answered | Low | open | `ListenerMessageTest` pins the unknown-method case |
 
 F1, F2 and F3 were reported by an external disclosure. F4–F10 were found while verifying them.
 
@@ -42,6 +43,17 @@ build/test/module-tests --test=SessionIdTest
 
 `mcp-server-demo` (formerly also called `module-tests`) is the manual playground on port 3001 and
 is not a test. See [test/CMakeLists.txt](test/CMakeLists.txt) for how tests are registered.
+
+To check that the tests still *protect* the fixes rather than merely passing over them:
+
+```
+python3 tools_mutation_check.py            # revert one decision at a time; require a failure
+python3 tools_mutation_check.py --list
+python3 tools_mutation_check.py --only 7
+```
+
+It edits the working tree and rebuilds, so do not `git commit` while it runs. It currently covers
+F3 (13 mutations, all caught); extending it to the F1 and F2 decisions is task **T6.1**.
 
 ---
 
@@ -208,16 +220,63 @@ same test also pins two things the fix must not break (`tools/list`, `ping`, unk
 that is wrong today: a request with an `id` and an unknown method is currently **ignored**, where
 JSON-RPC requires a `-32601` reply.
 
-**Fix.** Three layers:
+**Fix — landed.** Three layers, as planned, in `Listener.cpp` and `event/Session.cpp`.
 
-1. validate the envelope before dispatch — parseable, a map, `method` a string, `params` absent or
-   a map, `id` string/number/null — and answer `-32700` / `-32600` / `-32601`;
-2. wrap dispatch in `try`/`catch` and answer `-32603`; move each handler's `remap` inside its `try`;
-3. wrap `Session::listen()` so that no listener exception can reach `std::terminate`. A session
-   dies before the process does.
+1. **Envelope validation** (`Listener::handleCall`, split out of `onEvent`) — parseable, a JSON
+   object, `id` a string or number, `method` a string, `params` absent or an object — each failure
+   answered with the code that describes it. An absent `params` is normalised to an empty object:
+   remapping a *missing* node into a params DTO is one of the things that aborted the process, and
+   every params field of every method is optional at the DTO level, so the handler — not the
+   remapper — is what should report a missing required field.
+2. **Every handler wraps its own parameter remap** and answers `-32602`; the tool/prompt/resource
+   invocation `catch` blocks gained a `catch (...)` they did not have.
+3. **`Session::listen()` wraps the listener call.** A listener is extension code, so "it cannot
+   throw" is not a property of this library; an exception that reaches the top of that detached
+   thread is `std::terminate`, and short of that the session is never removed from its server's
+   registry. Log, drop the message, keep the session.
 
-Keep the client-facing message generic and log the detail server-side: today `e.what()` from the
-JSON mapper is echoed straight back to the caller.
+`onEvent()` keeps an outer `catch` as the last line, and it deliberately **does not reply**: by then
+there is no way to know whether a response already went out for the id, and a second response to the
+same id is a worse protocol violation than silence.
+
+The error taxonomy, now visible to clients:
+
+| situation | code | example |
+|---|---|---|
+| not JSON at all | `-32700` | the disclosed empty POST body, `"not json at all"`, binary junk |
+| JSON, not a request object | `-32600` | `null`, `[1,2,3]` |
+| `id` not a string/number | `-32600` | `"id":{…}` — and it is not reflected back |
+| `method` missing or not a string | `-32600` | `"method":123` |
+| `params` present and not an object | `-32600` | `"params":123`, `"params":[1]` |
+| method exists, parameters do not fit | `-32602` | `"params":{"name":123}`, `"arguments":5`, `"cursor":123` |
+| required field missing | `-32602` | `tools/call` with no `name` |
+| unknown method **with an id** | `-32601` | previously a black hole: the client waited forever |
+| unknown method **with no id** | *no reply* | a notification must not be answered (JSON-RPC §4.1) |
+| a handler threw | `-32603` / `isError` result | detail logged, not sent |
+
+**`e.what()` no longer goes to the client.** It was being placed straight into error messages and
+into tool results; it now goes to the log, and the client gets `Invalid params` / `Internal error` /
+`Tool handler thrown an exception`. A tool that wants the model to see its own failure text should
+say so in an `isError` result it builds itself — that is a different channel from an exception that
+happened to carry library internals.
+
+**Verified.** `ListenerMessageTest` — 117 checks, all green — drives `onEvent()` with the corpus
+above plus controls, asserts the **specific error code** (not merely that an error came back), that
+control rows get a *result* rather than an error, that the registered tool ran or did not run, and —
+for layer 3 — that a listener which throws three times leaves the session thread alive and reading.
+
+The fix was then mutation-checked: **13 of 13 reverted decisions are caught by the suite** (swallow
+the parse error, drop each of the four envelope checks, answer notifications anyway, drop the params
+normalisation, unwrap each handler's remap, remove the `Session::listen` guard). Two of them were
+*not* caught by the first version of the test — the parse-error reply and the params normalisation —
+which is why the corpus now pins codes and why a control row has to be a result, not just "a reply".
+
+End to end against the demo server: 19 malformed payloads (including the disclosed empty body and
+binary junk) leave the process alive, and normal operation is unaffected — `tools/list`, `tools/call`
+and `ping` still round-trip, `-32601` reaches the client for an unknown method, and a notification
+for an unknown method gets no reply.
+
+**Not fixed here:** see [F11](#f11--a-notification-with-a-known-method-is-answered).
 
 ---
 
@@ -296,6 +355,31 @@ must be added before the server starts.
 
 **Where:** `src/oatpp-mcp/sse/Controller.hpp` — `BODY_STRING(String, body)` reads the whole POST
 body into memory. **Fix:** configure a maximum message size.
+
+---
+
+## F11 — a notification with a known method is answered
+
+**Where:** `src/oatpp-mcp/Listener.cpp` — every handler ends in `sendRpcResult()`.
+
+JSON-RPC 2.0 §4.1: a Notification is a request without an `id`, and the server **must not** reply to
+it. Since the F3 fix, unknown-method notifications are correctly ignored — but a notification naming
+a *known* method still gets a full response, addressed to `id: null`:
+
+```
+--> {"jsonrpc":"2.0","method":"tools/list"}
+<-- {"jsonrpc":"2.0","result":{"tools":[…]}      <- no id came in, so none goes out either
+```
+
+Found while fixing F3, and deliberately left alone: the handlers do not currently know whether the
+message had an `id`, threading that through every handler is a behaviour change for anyone whose
+client omits ids and waits for replies, and MCP's own notifications (`notifications/initialized`,
+`notifications/cancelled`) are unknown methods here and are already handled correctly — so nothing
+in the disclosed attack surface depends on it.
+
+**Fix:** pass the presence of an `id` down (or hand the handlers a small `Reply` object that knows
+whether it may send), and suppress the response for notifications. `ListenerMessageTest` has the
+`NoResponse` expectation ready for the rows this needs.
 
 ---
 
