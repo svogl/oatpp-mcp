@@ -15,8 +15,20 @@ Server::Server(const Config& config)
   : m_config(config)
   , m_pinger(std::make_shared<oatpp::mcp::Pinger>())
   , m_eventListener(std::make_shared<oatpp::mcp::Listener>())
-  , m_eventServer(std::make_shared<oatpp::mcp::event::Server>(m_pinger))
+  , m_eventServer(std::make_shared<oatpp::mcp::event::Server>(m_pinger, config.sessions))
 {
+
+  if(m_config.access.allowedHosts.empty()) {
+    /*
+     * The Origin check catches a page on another site driving this server, but it cannot see DNS
+     * rebinding, where the attacker's own domain is both the Origin and the Host. Only a list of
+     * the names this server is willing to be called by can - and only an operator knows them.
+     */
+    OATPP_LOGw("[oatpp::mcp::Server::Server()]",
+               "Warning - no Host allow-list configured (Config::access::allowedHosts); "
+               "DNS rebinding is not mitigated. A local server should set it to, e.g., "
+               "{\"localhost\", \"127.0.0.1\"}")
+  }
 
   m_schemaMapper = std::make_shared<oatpp::mcp::utils::ObjectSchemaMapper>();
 
@@ -62,7 +74,8 @@ void Server::addEndpoints(const oatpp::web::server::api::Endpoints& endpoints) {
 
 std::shared_ptr<web::server::api::ApiController> Server::getSseController() {
   if(!m_sseController) {
-    m_sseController = std::make_shared<oatpp::mcp::sse::Controller>(m_eventServer, m_eventListener, m_mappers, m_config.ssePrefix);
+    m_sseController = std::make_shared<oatpp::mcp::sse::Controller>(
+      m_eventServer, m_eventListener, m_mappers, m_config.ssePrefix, m_config.access);
   }
   return m_sseController;
 }
@@ -70,6 +83,14 @@ std::shared_ptr<web::server::api::ApiController> Server::getSseController() {
 void Server::stdioListen() {
 
   auto session = m_eventServer->startNewSession(m_eventListener);
+  if(!session) {
+    /* Only the SSE endpoint can be refused for being full, and it answers 503; stdio has no such
+     * conversation to have, so a full registry here is a misconfiguration to be reported. */
+    OATPP_LOGe("[oatpp::mcp::Server::stdioListen()]",
+               "Error - no session available (limit of {} sessions)",
+               m_config.sessions.maxSessions)
+    return;
+  }
 
   std::thread tin([session]{
     std::string line;

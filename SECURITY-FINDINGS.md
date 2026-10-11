@@ -14,8 +14,8 @@ by running the code, not by reading it.
 | [F1](#f1--request-smuggling-via-tool-arguments) | Request smuggling via tool arguments | High | **fixed** | `HttpSanitizeTest`, `ToolHttpFramingTest` |
 | [F2](#f2--session-identifiers-are-heap-addresses) | Session identifiers are heap addresses | High | **fixed** | `UuidTest`, `SessionIdTest` |
 | [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **fixed** | `ListenerMessageTest` |
-| [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | open | — |
-| [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | open | — |
+| [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | **fixed** | `AccessGuardTest`, `SseAccessTest` |
+| [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | partly fixed — bounded, still two threads each | `SseAccessTest` |
 | [F6](#f6--attacker-controlled-text-in-info-level-logs) | Attacker-controlled text in info-level logs | Medium | **fixed** | `LogSafeTest`, `ToolLoggingTest` |
 | [F7](#f7--apibridge-cannot-be-stopped) | `ApiBridge` cannot be stopped | Medium | open | — |
 | [F8](#f8--dropped-events-are-silent) | Dropped events are silent | Low | open | — |
@@ -53,7 +53,7 @@ python3 tools_mutation_check.py --only 7
 ```
 
 It edits the working tree and rebuilds, so do not `git commit` while it runs. It currently covers
-F3 and F6 (23 mutations, all caught); extending it to the F1 and F2 decisions is task **T6.1**.
+F3, F4 and F6; extending it to the F1 and F2 decisions is task **T6.1**.
 
 ---
 
@@ -290,9 +290,78 @@ so guessing cannot even be distinguished from a live session, and a browser page
 localhost MCP server through DNS rebinding (the MCP specification requires the Host/Origin check
 for exactly this reason).
 
-This is what turns F2 from a weakness into an attack. **Fix:** reject cross-origin `Origin` and
-unexpected `Host` (configurable allow-list), answer `404` for unknown sessions, optionally bind a
-session to the peer address that opened it.
+This is what turns F2 from a weakness into an attack: a random identifier is only a capability while
+nobody can obtain one, and "open a session and read the identifier the server hands back" obtained
+one for free while the identifier was an address.
+
+**Fix — landed.** `src/oatpp-mcp/utils/AccessGuard.{hpp,cpp}`, consulted by both endpoints of
+`sse::Controller` before either does anything else, plus limits on the session registry in
+`event::Server`.
+
+| decision | what was chosen | why |
+|---|---|---|
+| `Origin` present | must equal this server's own origin (`http(s)://` + the request's `Host`) or be named in `allowedOrigins` | a browser sends `Origin` when the request is not same-origin; requiring agreement costs nothing to curl, the SDKs and a proxy, and removes the "any web page can drive the operator's localhost server" case outright |
+| `Origin` absent | allowed | non-browser clients — the majority of MCP clients — send none. Requiring one would break them and would not stop an attacker, who can simply omit it |
+| `Origin: null` | refused | what a sandboxed frame and a `file://` page send; neither is a place an MCP client should be coming from |
+| origin scheme | not compared | TLS terminated in front of this server means the page is `https` and the `Host` header says nothing about it. Comparing schemes would break every such deployment to gain nothing |
+| `Host` | if `allowedHosts` is non-empty, the header must match one entry — exact host, case-insensitive, port required only when the entry names one | the only check that can see DNS rebinding |
+| `allowedHosts` default | **empty = any Host** | the library cannot know the addresses it is deployed on, and a wrong default here breaks the server rather than protecting it. The consequence is stated in the config's own documentation, logged once at startup when it is unset, and pinned by a test row that says the rebinding request is *accepted* under the default configuration |
+| unknown session | `404`, was `200 OK` | a probe for an identifier used to be indistinguishable from a delivered message, to the client and to the operator's log alike. The body says no more than "No such session" — whether an identifier was once valid is not the caller's business |
+| refused request | answered before the session is opened or the message is posted, with the rule named and the offending value only in the log | ordering is the fix: a check that runs after the work is a report, not a defence |
+| `maxSessions` | 1000 by default, `0` for unlimited; a full server answers `503` | the number being *finite* is the point — see F5. Generous because refusing a client is a real cost, and 1000 concurrent SSE clients is far past what this server is likely to see |
+| `sessionIdleTimeoutMillis` | 0 (never) by default | expiring a client that is connected but quiet is a behaviour change, and a stdio session in particular is expected to idle between tool calls. When set, the listen loop wakes for the timeout rather than only for the ping, so a session dies on time and not up to five seconds late |
+| peer-address binding | **not implemented** | see "What this did not do" |
+
+**Verified.** `AccessGuardTest` — 120 checks — is the policy as a table of (configuration, Origin,
+Host) pairs, including the ones that are easy to get wrong: `localhost.evil.example` against an
+allow-list entry of `localhost`, an IPv6 literal with and without a port, an origin with a path on
+the end, a missing `Host` (400, not 403), and the rebinding request both refused (list configured)
+and accepted (default configuration).
+
+`SseAccessTest` — 24 checks — puts the real `sse::Controller` on a real socket, because "the endpoint
+forgot to ask the guard" is invisible to a unit test of the guard. It asserts the status codes, that
+a refused `GET /sse` opened **no** session, that a refused `POST` delivered **nothing** to the
+session's listener, that a live session still receives its message unchanged, that a full server
+answers 503 and then answers 200 again once a slot frees, and that an idle session is reclaimed
+while a session with no timeout is left alone.
+
+Twelve F4 decisions are in `tools_mutation_check.py` — stop checking Origin, stop checking Host, treat
+any origin as self, accept `null`, match a Host as a substring, ignore the port, drop the guard from
+either endpoint, answer 200 for an unknown session, skip the cap, never expire a session, and stop
+waking the loop for the expiry. All twelve are caught; so are the F3 and F6 ones, **35 of 35**.
+
+One of them was not caught to begin with. Removing the `Origin: null` branch leaves the request
+refused anyway — a `null` origin is neither self nor named — so the only thing the branch changes is
+the *message*, and no test looked at the message. Rather than delete the branch or the mutation, the
+tests now pin the reason for the refusals where the reason is the answer an operator needs: "Origin
+'null' is not allowed" is a sandboxed frame, "Host is not allowed" is a rebinding or a misconfigured
+proxy, and "Missing Host header" is a client that should not have got this far.
+
+End to end against the demo server, which now configures `{"localhost", "127.0.0.1"}`:
+
+```
+GET  /mcp/sse                               200      (no Origin: a native client)
+GET  /mcp/sse   Origin: http://evil.example 403      rejected GET sse: Origin is not allowed
+GET  /mcp/sse   Host: rebound.attacker...   403      rejected GET sse: Host is not allowed
+GET  /mcp/sse   Origin: http://localhost:3001 200    (same-origin browser)
+POST /mcp/sessions/<unknown>                404      no session to deliver to: <unknown>
+```
+
+and a real client is unaffected: `tools/list`, `tools/call getUserById` and the F1 smuggling payload
+all return over the SSE stream, and the smuggling payload still runs exactly one controller —
+`UserController:getUsers`, with the injected `GET /users/424242` percent-encoded into the query.
+
+**What this did not do.**
+
+- **Peer-address binding** ("the session may only be addressed from the address that opened it") is
+  still open. With F2 fixed it defends a capability that is already unguessable, it breaks every
+  deployment behind NAT or a proxy, and the two decisions worth making first — where the address
+  comes from when the server is behind a proxy that sets `X-Forwarded-For`, and what to do about a
+  client whose address legitimately changes — are deployment questions this module should not answer
+  by guessing.
+- **Authentication** of any kind. The MCP spec leaves it to the transport and the deployment; what
+  this adds is that the server no longer pretends an identifier is an authenticator.
+- **Message rate and body size** — see F10.
 
 ## F5 — two blocked threads per SSE connection
 
@@ -300,9 +369,14 @@ session to the peer address that opened it.
 `src/oatpp-mcp/sse/ReadCallback.cpp` (the connection thread blocks in `EventStream::read` for the
 lifetime of the connection). `HttpConnectionHandler` is itself thread-per-connection with no cap.
 
-N idle SSE clients cost 2N threads and nothing limits N. **Fix:** cap sessions, add an idle TTL, and
-document the thread cost; ideally drive the SSE body with oatpp's async/streaming facilities instead
-of a blocked worker.
+N idle SSE clients cost 2N threads and nothing limited N.
+
+**Partly fixed with F4.** `event::Server::Config::maxSessions` (default 1000) bounds N, and
+`sessionIdleTimeoutMillis` reclaims a session whose client stopped talking but never hung up — the
+idle timeout also unblocks the parked SSE writer, which is what frees the connection thread. What
+remains is the model itself: two threads per client, one of them doing nothing but waiting.
+**Fix:** drive the SSE body with oatpp's async/streaming facilities instead of a blocked worker, and
+document the thread cost of the synchronous one.
 
 ## F6 — attacker-controlled text in info-level logs
 

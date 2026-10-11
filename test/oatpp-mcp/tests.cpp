@@ -11,10 +11,12 @@
 // place to look when it does.
 //
 
+#include "oatpp-mcp/tests/AccessGuardTest.hpp"
 #include "oatpp-mcp/tests/HttpSanitizeTest.hpp"
 #include "oatpp-mcp/tests/ListenerMessageTest.hpp"
 #include "oatpp-mcp/tests/LogSafeTest.hpp"
 #include "oatpp-mcp/tests/SessionIdTest.hpp"
+#include "oatpp-mcp/tests/SseAccessTest.hpp"
 #include "oatpp-mcp/tests/ToolHttpFramingTest.hpp"
 #include "oatpp-mcp/tests/ToolLoggingTest.hpp"
 #include "oatpp-mcp/tests/UuidTest.hpp"
@@ -62,6 +64,14 @@ static std::vector<TestDescriptor> tests() {
         std::make_shared<oatpp::mcp::test::LogSafeTest>()); }
     },
     TestDescriptor{
+      "AccessGuardTest",
+      "TEST[mcp::AccessGuard]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::AccessGuardTest>()); }
+    },
+    TestDescriptor{
       "UuidTest",
       "TEST[mcp::Uuid]",
       true,
@@ -101,6 +111,14 @@ static std::vector<TestDescriptor> tests() {
       nullptr,
       [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
         std::make_shared<oatpp::mcp::test::ToolLoggingTest>()); }
+    },
+    TestDescriptor{
+      "SseAccessTest",
+      "TEST[mcp::SseAccess]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::SseAccessTest>()); }
     },
   };
 }

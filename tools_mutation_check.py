@@ -30,6 +30,9 @@ BUILD = os.path.join(ROOT, "build")
 LISTENER = "src/oatpp-mcp/Listener.cpp"
 LOGSAFE = "src/oatpp-mcp/utils/LogSafe.cpp"
 SESSION = "src/oatpp-mcp/event/Session.cpp"
+ACCESS = "src/oatpp-mcp/utils/AccessGuard.cpp"
+CONTROLLER = "src/oatpp-mcp/sse/Controller.hpp"
+EVENT_SERVER = "src/oatpp-mcp/event/Server.cpp"
 
 # ---------------------------------------------------------------------------------------------
 # F3 - remote denial of service on malformed messages
@@ -62,22 +65,18 @@ TOOLS_REMAP = """  oatpp::Object<dto::ClientParamsToolsCall> callParams;
     return;
   }"""
 
-LISTEN_GUARD = """    try {
-
-      auto event = m_inStream->read(std::chrono::milliseconds(5000));
-      if(event) {
-        listener->onEvent(*this, event);
-      } else if (m_pinger) {
-        m_pinger->onPing(*this);
-      }
-
-    } catch (const std::exception& e) {
+LISTEN_GUARD = """    } catch (const std::exception& e) {
       OATPP_LOGe("[oatpp::mcp::Session::listen()]",
                  "Error - listener threw for session {}, continuing: {}", m_id, e.what())
     } catch (...) {
       OATPP_LOGe("[oatpp::mcp::Session::listen()]",
                  "Error - listener threw an unknown exception for session {}, continuing", m_id)
     }"""
+
+# The idle-timeout rule, and the early wake that makes it fire on time rather than one ping late.
+TTL_RULE = """      if(m_idleTimeout > std::chrono::milliseconds::zero()
+         && (now - lastActivity) >= m_idleTimeout) {"""
+TTL_WAKE = "        if(remaining < wait) {"
 
 
 def handler_remap(method, dto):
@@ -175,14 +174,64 @@ MUTATIONS = [
      "  // mutated", "LogSafeTest"),
 
     ("F3: session thread does not guard the listener call", SESSION, LISTEN_GUARD,
-     """    {
-      auto event = m_inStream->read(std::chrono::milliseconds(5000));
-      if(event) {
-        listener->onEvent(*this, event);
-      } else if (m_pinger) {
-        m_pinger->onPing(*this);
-      }
+     """    } catch (const std::exception&) {
+      throw;
     }""", "ListenerMessageTest"),
+
+    # -------------------------------------------------------------------------------------------
+    # F4 - Origin, Host, unknown sessions and the session limits
+    # -------------------------------------------------------------------------------------------
+
+    ("F4: the Origin rule does not run", ACCESS,
+     "  if(m_config.checkOrigin && !trimmedOrigin.empty()) {", "  if(false) {",
+     "AccessGuardTest"),
+
+    ("F4: the Host allow-list does not run", ACCESS,
+     "  if(!m_config.allowedHosts.empty()) {", "  if(false) {", "AccessGuardTest"),
+
+    ("F4: any origin is treated as this server's own", ACCESS,
+     "      allowed = originIsSelf(origin, host);", "      allowed = true;", "AccessGuardTest"),
+
+    ("F4: Origin: null is accepted", ACCESS,
+     '    if(trimmedOrigin == "null") {', "    if(false) {", "AccessGuardTest"),
+
+    ("F4: a Host that merely contains an allowed name is accepted", ACCESS,
+     """  if(hostName != entryName) {
+    return false;
+  }""",
+     """  if(hostName.find(entryName) == std::string::npos) {
+    return false;
+  }""", "AccessGuardTest"),
+
+    ("F4: the port of a Host entry is ignored", ACCESS,
+     "  return entryPort.empty() || entryPort == hostPort;", "  return true;",
+     "AccessGuardTest"),
+
+    ("F4: GET sse does not consult the guard", CONTROLLER,
+     """    if(auto refusal = reject(request, "GET sse")) {
+      return refusal;
+    }""",
+     "    // mutated: the endpoint stopped asking", "SseAccessTest"),
+
+    ("F4: POST sessions does not consult the guard", CONTROLLER,
+     """    if(auto refusal = reject(request, "POST sessions")) {
+      return refusal;
+    }""",
+     "    // mutated: the endpoint stopped asking", "SseAccessTest"),
+
+    ("F4: an unknown session is answered 200 again", CONTROLLER,
+     'return createResponse(Status::CODE_404, "No such session");',
+     'return createResponse(Status::CODE_200, "OK");', "SseAccessTest"),
+
+    ("F4: the session cap is not enforced", EVENT_SERVER,
+     "if(m_config.maxSessions > 0 && m_sessions.size() >= m_config.maxSessions) {",
+     "if(false) {", "SseAccessTest"),
+
+    ("F4: an idle session is never closed", SESSION, TTL_RULE, "      if(false) {",
+     "SseAccessTest"),
+
+    ("F4: the loop does not wake for the idle timeout", SESSION, TTL_WAKE, "        if(false) {",
+     "SseAccessTest"),
 ]
 
 

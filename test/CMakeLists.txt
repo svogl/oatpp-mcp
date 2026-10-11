@@ -71,11 +71,13 @@ mcp_configure_target(mcp-server-demo)
 set(MCP_TESTS
         HttpSanitizeTest
         LogSafeTest
+        AccessGuardTest
         UuidTest
         SessionIdTest
         ListenerMessageTest
         ToolHttpFramingTest
         ToolLoggingTest
+        SseAccessTest
 )
 
 set(MCP_TEST_SOURCES

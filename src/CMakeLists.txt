@@ -23,6 +23,8 @@ add_library(${OATPP_THIS_MODULE_NAME}
         oatpp-mcp/sse/Controller.hpp
         oatpp-mcp/sse/ReadCallback.cpp
         oatpp-mcp/sse/ReadCallback.hpp
+        oatpp-mcp/utils/AccessGuard.cpp
+        oatpp-mcp/utils/AccessGuard.hpp
         oatpp-mcp/utils/ApiBridge.cpp
         oatpp-mcp/utils/ApiBridge.hpp
         oatpp-mcp/utils/HttpSanitize.cpp
