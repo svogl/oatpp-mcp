@@ -600,6 +600,13 @@ Found while fixing F8, because the fix is what made `read()`'s contract worth wr
 the loop depends on — `read()` returns an invalid event once a stream is closed *and drained*, and
 nothing before that — is pinned by `EventStreamTest`.
 
+**Still there, and deliberately not touched.** The same pair of threads means `stdioListen()` does not
+return when its client closes stdin: `tin` finishes, nothing closes the session, and `tout` waits in
+`read()` forever. Closing the session at stdin EOF would fix the hang and cut off any tool call still
+running, which is a decision about in-flight work rather than a bug fix — so it is written down here
+instead of being guessed at. It is unchanged by F12; the loop used to hang the same way and crash on
+the way in.
+
 ---
 
 ## Base project (oatpp)
