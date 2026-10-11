@@ -18,10 +18,11 @@ by running the code, not by reading it.
 | [F5](#f5--two-blocked-threads-per-sse-connection) | Two blocked threads per SSE connection | Medium | partly fixed — bounded, still two threads each | `SseAccessTest` |
 | [F6](#f6--attacker-controlled-text-in-info-level-logs) | Attacker-controlled text in info-level logs | Medium | **fixed** | `LogSafeTest`, `ToolLoggingTest` |
 | [F7](#f7--apibridge-cannot-be-stopped) | `ApiBridge` cannot be stopped | Medium | open | — |
-| [F8](#f8--dropped-events-are-silent) | Dropped events are silent | Low | open | — |
+| [F8](#f8--dropped-events-are-silent) | Dropped events are silent | Low | **fixed** | `EventStreamTest`, `SseBackpressureTest`, `ListenerMessageTest` |
 | [F9](#f9--capability-registries-are-not-thread-safe) | Capability registries are not thread safe | Low | open | — |
 | [F10](#f10--no-body-size-limit-and-no-rate-limiting) | No body size limit, no rate limiting | Low | open | — |
 | [F11](#f11--a-notification-with-a-known-method-is-answered) | A notification with a known method is answered | Low | open | `ListenerMessageTest` pins the unknown-method case |
+| [F12](#f12--the-stdio-transport-dereferences-a-null-event-on-shutdown) | stdio dereferences a null event on shutdown | Low | **fixed** | contract pinned by `EventStreamTest`; the loop itself is not covered |
 
 F1, F2 and F3 were reported by an external disclosure. F4–F10 were found while verifying them.
 
@@ -53,7 +54,7 @@ python3 tools_mutation_check.py --only 7
 ```
 
 It edits the working tree and rebuilds, so do not `git commit` while it runs. It currently covers
-F3, F4 and F6; extending it to the F1 and F2 decisions is task **T6.1**.
+F3, F4, F6 and F8; extending it to the F1 and F2 decisions is task **T6.1**.
 
 ---
 
@@ -378,6 +379,17 @@ remains is the model itself: two threads per client, one of them doing nothing b
 **Fix:** drive the SSE body with oatpp's async/streaming facilities instead of a blocked worker, and
 document the thread cost of the synchronous one.
 
+**Also bounded with F8.** `event::Server::Config::maxQueuedEvents` (default 100, per session and per
+direction) is the memory half of the same idle client: what a stalled reader accumulates used to be
+one hundred messages because a constructor said so, and it is now a configuration an operator can see
+and change.
+
+One thing about F5 is **not** fixable from here, and it is worth being blunt about because it makes
+`maxSessions` less protective than it looks: `HttpConnectionHandler` starts a thread for every
+accepted connection, with no cap and no read timeout, so **N idle TCP connections cost N threads
+before any MCP session exists**. A client that connects and sends nothing never reaches the session
+registry at all. Recorded as **B8** in the base-project table below.
+
 ## F6 — attacker-controlled text in info-level logs
 
 **Where:** `src/oatpp-mcp/capabilities/Tool.cpp` — `OATPP_LOGi` printed the resolved request path and
@@ -460,9 +472,69 @@ and either wire the async router properly or remove the async accessors until th
 
 ## F8 — dropped events are silent
 
-**Where:** `src/oatpp-mcp/event/EventStream.cpp` — `post()` returns void and drops the event when
-the queue is full (100) or the stream is closed. A slow SSE reader therefore makes the server
-silently ignore valid RPC calls. **Fix:** return whether the event was queued and log/count drops.
+**Where:** `src/oatpp-mcp/event/EventStream.cpp` — `post()` returned `void` and discarded the event
+when the queue was full (100) or the stream was closed.
+
+A queue has to be finite, and a finite queue that refuses work has to say so. This one could not, so
+nothing above it could tell a delivered message from a discarded one:
+
+- `POST /mcp/sessions/{id}` answered **200 "OK"** to a message it had already thrown away. The client
+  sat waiting for a response to a call the server never took.
+- `Listener::sendRpcResult()` dropped the reply on the floor. "The server ignored a valid call" and
+  "the client hung up" produced identical logs — that is to say, none.
+- `stdioListen()` did the same to both of its threads, and additionally took apart the null event
+  `read()` hands back once a session is closed — see **F12**.
+
+The queue is not hypothetical. A hundred queued messages is what one client produces by pipelining
+calls while its SSE reader is behind: a proxy buffering the stream, a client that opens the event
+stream only after sending the calls, or a reader that died without the connection dying with it.
+
+**Fix — landed.** `post()` reports what happened, and everyone who calls it does something with the
+answer.
+
+| decision | what was chosen | why |
+|---|---|---|
+| `post()` returns | `PostResult`: `Queued`, `DroppedFull`, `DroppedClosed` | an enum and not a bool — "retry later" and "never" are different answers to give a sender, and they used to be one silent outcome |
+| `post()` on a full queue | refuses immediately; never blocks | the caller is a session thread or an HTTP connection thread. Backpressure would turn a lost message into a hung server, and the thread it blocks is the one that would notice the client died |
+| `POST` over a full queue | `503` with `Retry-After: 1` | 200 is a claim about a message that was already discarded. 429 is about rate; this is capacity, and "not now" is the truth |
+| `POST` to a closed session | `404` — the same answer as an unknown session | "this identifier used to be valid" is not for the transport to learn, and the two states are one line apart in a registry that forgets sessions by itself |
+| counters | `EventStream::stats()` — queued, dropped-full, dropped-closed | a log record is a fact that happened once; a counter is what an operator alerts on, and what separates one hiccup from a client that has stopped reading |
+| logging | warning, the first drop and then every 100th, with the running total in every record | a stream whose reader died drops forever. One record per drop trades a lost message for a log flood — the same availability problem one level down |
+| what a drop record holds | event name, reason, limit, totals — never the payload | a drop is a transport fact; the data is whatever the tool read, and F6 is about not putting that in the log |
+| a reply that cannot be queued | logged as a warning: session, reason, bytes lost | the outbound direction has no status code to carry the news, so the log is all there is and it has to be enough |
+| events queued at `close()` | **drained, not discarded** | a session being torn down still holds its client's last answers. Closing stops the waiting, not the reading |
+| the bound | `event::Server::Config::maxQueuedEvents`, default 100, `0` = unbounded, per session and per direction | the number used to be a literal in a constructor, invisible to the one person allowed to decide it. Per session, so a client that stopped reading cannot spend another client's capacity |
+
+**API change.** `EventOutputStream::post()` returns `PostResult` instead of `void`, and
+`EventStream::read()` now returns whatever is queued after a `close()` before reporting end-of-stream.
+Callers that ignore the result are unaffected; anything implementing `EventOutputStream` has to change
+its signature, and nothing in this module does.
+
+**Verified.** `EventStreamTest` — 36 checks — is the queue as a table: FIFO; the bound refusing the
+N+1'th event *without displacing what is already queued*; the two reasons counted separately;
+close-then-drain; 1000 refusals in milliseconds (the "never blocks" property, timed rather than
+asserted by faith); an unbounded queue accepting what it is given; and a producer/consumer pair
+moving 5000 events through a queue of 8 with `queued + dropped == posted` and `delivered == queued`
+— that last one is the drain, and it fails on the old code. The log is captured, not eyeballed: a
+drop produces a record, 1000 drops produce ten of them, every record is one line, and the reason and
+the running total are in it.
+
+`SseBackpressureTest` — 23 checks — drives the real controller over a real socket with a listener
+that can be stopped from taking messages, because "the queue is full" is not a state a test reaches
+by asking a listener that keeps up to stop keeping up. It asserts 200 for a session that is reading;
+503 — not 200, and not a body that says "OK" — for one that is not; a `Retry-After` on the 503; that
+the refused messages **did not arrive**; that the endpoint accepts again once the queue drains; that
+a closed-but-still-registered session answers 404; that a second session is unaffected while the
+first is stalled; and that 50 pipelined messages to a default-configured session are all accepted —
+the bound exists to bound memory, not to throttle working clients.
+
+`ListenerMessageTest` gained the outbound half: with a session's out stream closed, the reply is
+reported to the log with the reason it could not be delivered.
+
+Eleven F8 decisions are in `tools_mutation_check.py` — unbind the queue, report a refusal as a
+delivery, stop counting either kind of drop, silence the drop log, log every drop, discard on close,
+answer 200 for a full queue, answer 200 for a closed session, ignore the configured bound, and stop
+reporting an undeliverable reply. **All eleven are caught.**
 
 ## F9 — capability registries are not thread safe
 
@@ -503,6 +575,33 @@ whether it may send), and suppress the response for notifications. `ListenerMess
 
 ---
 
+## F12 — the stdio transport dereferences a null event on shutdown
+
+**Where:** `src/oatpp-mcp/Server.cpp`, `stdioListen()`:
+
+```cpp
+while (session->isOpen()) {
+  auto e = session->getOutStream()->read(std::chrono::milliseconds(0));
+  std::cout << *e.data << std::endl;      // e.data is null once the stream is closed
+}
+```
+
+`read()` returns an invalid `Event` in exactly the situation this loop can reach: the stream has been
+closed. `isOpen()` and "there is an event" are different questions, and the loop tested one and then
+answered the other — so every clean shutdown of a stdio MCP server dereferenced a null
+`oatpp::String`. Whether that reads as a crash or as silence is up to the allocator; it is undefined
+either way, and it is on the normal exit path rather than under attack.
+
+Found while fixing F8, because the fix is what made `read()`'s contract worth writing down.
+
+**Fix — landed.** The loop reads until `read()` says there is nothing more, which with drain-on-close
+(F8) also means it flushes what was queued before it exits. **Not covered by an automated test**:
+`stdioListen()` reads the process's real stdin, and this suite has no harness for that. The contract
+the loop depends on — `read()` returns an invalid event once a stream is closed *and drained*, and
+nothing before that — is pinned by `EventStreamTest`.
+
+---
+
 ## Base project (oatpp)
 
 Changes that belong upstream rather than here; the module fixes are sufficient on their own, these
@@ -517,6 +616,7 @@ are the second line of defence.
 | B5 | a CSPRNG-backed UUID helper, so modules stop hand-rolling identifiers from `std::mt19937`. `oatpp::utils::Random` is `std::mt19937` and is not a candidate for identifiers; `oatpp-mcp` grew its own (`utils/Uuid.{hpp,cpp}`, see F2) which is a suitable starting point if upstream wants one | new `utils/Uuid.hpp` |
 | B6 | **percent-decode what was encoded.** `Url::Parser::parseQueryParams()` splits on `&`/`=` and hands out raw labels; path-variable labels are raw too; `encoding::Url::decode()` is never called anywhere in the library. A correctly-encoded request therefore delivers `%20` to the endpoint | `network/Url.cpp`, `web/protocol/http/incoming/Request.cpp` |
 | B7 | `Executor::~Executor() = default` while workers own joinable threads — destroying a stopped-but-not-joined executor is `std::terminate` | `async/Executor.hpp` |
+| B8 | `HttpConnectionHandler::handleConnection()` starts a `std::thread` per accepted connection with no cap and no read timeout, so a client that connects and sends nothing costs a thread without ever opening a session — `event::Server::Config::maxSessions` cannot bound it, and nothing else in the library does. A configurable connection cap, and a timeout on a connection that never sends a request, belong here | `web/server/HttpConnectionHandler.cpp` |
 
 ## Conventions for the fix PRs
 

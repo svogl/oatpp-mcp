@@ -134,9 +134,38 @@ public:
     event::Event event;
     event.name = "post";
     event.data = body;
-    stream->post(event);
 
-    return createResponse(Status::CODE_200, "OK");
+    switch(stream->post(event)) {
+
+      case event::PostResult::Queued:
+        return createResponse(Status::CODE_200, "OK");
+
+      case event::PostResult::DroppedClosed:
+        /*
+         * The session was closed between the lookup above and the post. It gets the same answer as
+         * an identifier that never existed: "this one used to work" is not something the transport
+         * needs to know, and it is exactly what somebody probing for live sessions wants to learn.
+         */
+        return createResponse(Status::CODE_404, "No such session");
+
+      case event::PostResult::DroppedFull:
+        break;
+    }
+
+    /*
+     * Alive, and not reading. Answering 200 here would be a claim about a message that had already
+     * been thrown away, and the sender would wait for a response to a call the server never took -
+     * which is the failure this exchange exists to make visible. 503 with a Retry-After says what
+     * is actually true: not now.
+     */
+    OATPP_LOGw("[oatpp::mcp::sse::Controller]",
+               "Warning - session {} is not reading; refused a message of {} bytes",
+               session->getId(),
+               body ? body->size() : 0)
+
+    auto refused = createResponse(Status::CODE_503, "Session is not reading");
+    refused->putHeader("Retry-After", "1");
+    return refused;
   }
 
 };

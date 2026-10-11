@@ -33,6 +33,7 @@ SESSION = "src/oatpp-mcp/event/Session.cpp"
 ACCESS = "src/oatpp-mcp/utils/AccessGuard.cpp"
 CONTROLLER = "src/oatpp-mcp/sse/Controller.hpp"
 EVENT_SERVER = "src/oatpp-mcp/event/Server.cpp"
+EVENT_STREAM = "src/oatpp-mcp/event/EventStream.cpp"
 
 # ---------------------------------------------------------------------------------------------
 # F3 - remote denial of service on malformed messages
@@ -77,6 +78,11 @@ LISTEN_GUARD = """    } catch (const std::exception& e) {
 TTL_RULE = """      if(m_idleTimeout > std::chrono::milliseconds::zero()
          && (now - lastActivity) >= m_idleTimeout) {"""
 TTL_WAKE = "        if(remaining < wait) {"
+
+# F8 - the queue, its bound, and what is said when it refuses
+QUEUE_BOUND = "    } else if(m_maxQueueSize > 0 && m_queue.size() >= m_maxQueueSize) {"
+DROP_LOG = "  if(dropped == 1 || dropped % DropLogInterval == 0) {"
+DRAIN_ON_CLOSE = "  if(m_queue.empty()) return {};"
 
 
 def handler_remap(method, dto):
@@ -220,8 +226,10 @@ MUTATIONS = [
      "    // mutated: the endpoint stopped asking", "SseAccessTest"),
 
     ("F4: an unknown session is answered 200 again", CONTROLLER,
-     'return createResponse(Status::CODE_404, "No such session");',
-     'return createResponse(Status::CODE_200, "OK");', "SseAccessTest"),
+     '''                 utils::LogSafe::text(sessionId))
+      return createResponse(Status::CODE_404, "No such session");''',
+     '''                 utils::LogSafe::text(sessionId))
+      return createResponse(Status::CODE_200, "OK");''', "SseAccessTest"),
 
     ("F4: the session cap is not enforced", EVENT_SERVER,
      "if(m_config.maxSessions > 0 && m_sessions.size() >= m_config.maxSessions) {",
@@ -232,6 +240,59 @@ MUTATIONS = [
 
     ("F4: the loop does not wake for the idle timeout", SESSION, TTL_WAKE, "        if(false) {",
      "SseAccessTest"),
+
+    # -------------------------------------------------------------------------------------------
+    # F8 - a queue that has to refuse says so, to the caller, in the counters and to the log
+    # -------------------------------------------------------------------------------------------
+
+    ("F8: the queue does not bound itself", EVENT_STREAM, QUEUE_BOUND, "    } else if(false) {",
+     "EventStreamTest"),
+
+    ("F8: a refusal is reported to the caller as a delivery", EVENT_STREAM,
+     "  if(result == PostResult::Queued) {", "  if(true) {", "EventStreamTest"),
+
+    ("F8: a full queue is not counted", EVENT_STREAM,
+     "      m_stats.droppedFull ++;", "      // mutated", "EventStreamTest"),
+
+    ("F8: a closed stream is not counted", EVENT_STREAM,
+     "      m_stats.droppedClosed ++;", "      // mutated", "EventStreamTest"),
+
+    ("F8: a drop is not reported to the log", EVENT_STREAM, DROP_LOG, "  if(false) {",
+     "EventStreamTest"),
+
+    ("F8: every drop is logged, so a dead reader floods the log", EVENT_STREAM, DROP_LOG,
+     "  if(true) {", "EventStreamTest"),
+
+    ("F8: closing a stream discards what is still queued", EVENT_STREAM, DRAIN_ON_CLOSE,
+     "  if(!m_open || m_queue.empty()) return {};", "EventStreamTest"),
+
+    ("F8: a refused POST is answered 200 again", CONTROLLER,
+     """      case event::PostResult::DroppedFull:
+        break;""",
+     """      case event::PostResult::DroppedFull:
+        return createResponse(Status::CODE_200, "OK");""", "SseBackpressureTest"),
+
+    ("F8: a closed session accepts the message again", CONTROLLER,
+     """        return createResponse(Status::CODE_404, "No such session");
+
+      case event::PostResult::DroppedFull:""",
+     """        return createResponse(Status::CODE_200, "OK");
+
+      case event::PostResult::DroppedFull:""", "SseBackpressureTest"),
+
+    ("F8: the queue bound is not taken from the configuration", EVENT_SERVER,
+     "      m_config.maxQueuedEvents);", "      EventStream::DefaultMaxQueueSize);",
+     "SseBackpressureTest"),
+
+    ("F8: a reply that could not be delivered is not reported", LISTENER,
+     """  auto outcome = session.getOutStream()->post(event);
+  if(!event::isQueued(outcome)) {
+    /*
+     * The work is done and the answer has nowhere to go.""",
+     """  auto outcome = session.getOutStream()->post(event);
+  if(false) {
+    /*
+     * The work is done and the answer has nowhere to go.""", "ListenerMessageTest"),
 ]
 
 

@@ -77,7 +77,16 @@ void Pinger::onPing(event::Session& session) {
   event::Event event;
   event.name = "message";
   event.data = m_mapper.writeToString(call);
-  session.getOutStream()->post(event);
+
+  /*
+   * A ping that cannot be queued means the client stopped reading - which the ping exists to find
+   * out, and which is not this session's fault. Debug, not warning: the queue already logs a drop,
+   * and a heartbeat fires every few seconds per session.
+   */
+  auto outcome = session.getOutStream()->post(event);
+  if(!event::isQueued(outcome)) {
+    OATPP_LOGd("Pinger", "[{}] ping not queued: {}", session.getId(), event::describe(outcome))
+  }
 
 }
 
@@ -120,7 +129,22 @@ void Listener::sendRpcResult(event::Session& session, const oatpp::Object<dto::R
   event.name = "message";
   event.data = m_mapper.writeToString(result);
 
-  session.getOutStream()->post(event);
+  auto outcome = session.getOutStream()->post(event);
+  if(!event::isQueued(outcome)) {
+    /*
+     * The work is done and the answer has nowhere to go. There is no second channel to this client,
+     * so all it will notice is a timeout - and without this line, so does nobody else: "the server
+     * ignored a valid call" and "the client stopped listening" used to look identical from here.
+     *
+     * What is logged is the size of the loss, not its content. A reply body is whatever the tool
+     * read, and a lost reply is a transport fact - see SECURITY-FINDINGS.md, findings F6 and F8.
+     */
+    OATPP_LOGw("Listener",
+               "[{}] reply could not be queued ({}) - {} bytes lost",
+               session.getId(),
+               event::describe(outcome),
+               event.data ? event.data->size() : 0)
+  }
 }
 
 void Listener::sendRpcError(event::Session& session, const oatpp::Any& id, v_int32 code,

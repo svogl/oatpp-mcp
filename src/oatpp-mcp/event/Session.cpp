@@ -19,12 +19,13 @@ constexpr std::chrono::milliseconds kMinWait{10};
 }
 
 Session::Session(const std::shared_ptr<Pinger>& pinger,
-                 std::chrono::milliseconds idleTimeout)
+                 std::chrono::milliseconds idleTimeout,
+                 v_uint32 maxQueuedEvents)
   : m_id(utils::Uuid::generateV4())
   , m_idleTimeout(idleTimeout)
   , m_pinger(pinger)
-  , m_inStream(std::make_shared<EventStream>())
-  , m_outStream(std::make_shared<EventStream>())
+  , m_inStream(std::make_shared<EventStream>(maxQueuedEvents))
+  , m_outStream(std::make_shared<EventStream>(maxQueuedEvents))
   , m_open(true)
 {}
 

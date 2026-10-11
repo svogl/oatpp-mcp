@@ -1,5 +1,6 @@
 #include "ListenerMessageTest.hpp"
 
+#include "LogCapture.hpp"
 #include "TestChecks.hpp"
 
 #include "oatpp-mcp/Listener.hpp"
@@ -14,6 +15,11 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+using oatpp::mcp::test::CapturingLogger;
+using oatpp::mcp::test::ScopedLogger;
+using oatpp::mcp::test::describe;
+using oatpp::mcp::test::withTag;
 
 namespace {
 
@@ -460,6 +466,41 @@ void oatpp::mcp::test::ListenerMessageTest::onRun() {
 
     session.close();
     running.join();
+  }
+
+  /*--------------------------------------------------- a reply with nowhere to go ---------*/
+  {
+    /*
+     * The outbound direction has no HTTP status code to carry the news. When the session's out stream
+     * will not take a reply, the log is the only record that the server did the work and could not
+     * deliver it - and "the server ignored a valid call" is otherwise indistinguishable from "the
+     * client hung up". (Finding F8; the inbound direction tells the sender instead - see
+     * SseBackpressureTest.)
+     */
+    oatpp::mcp::event::Session session;
+    session.getOutStream()->close();
+
+    auto capture = std::make_shared<CapturingLogger>();
+    {
+      ScopedLogger scope(capture);
+
+      oatpp::mcp::event::Event event;
+      event.name = "post";
+      event.data = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+      listener.onEvent(session, event);
+    }
+
+    auto mine = withTag(capture->records(), "Listener");
+    checks.check(!mine.empty(),
+                 "a reply that could not be queued is reported to the log",
+                 "captured: " + describe(capture->records()));
+    checks.check(!mine.empty()
+                   && mine.front().message.find("could not be queued") != std::string::npos,
+                 "and says that a reply was lost",
+                 "captured: " + describe(capture->records()));
+    checks.check(!mine.empty() && mine.front().message.find("stream closed") != std::string::npos,
+                 "and why it was lost",
+                 "captured: " + describe(capture->records()));
   }
 
   checks.assertNoFailures();

@@ -65,13 +65,21 @@ public:
    * @param idleTimeout - close the session once no <b>inbound</b> message arrived for this long.
    *        Zero never expires. Outbound traffic does not count: a client that is only receiving is
    *        by definition not the client that forgot to hang up.
+   * @param maxQueuedEvents - depth of each of the two queues, in and out. Zero means unbounded,
+   *        which is a memory bound being removed, not a limit being set - see
+   *        {@link EventStream::EventStream()}. A refusal to queue is reported to whoever posted it
+   *        rather than blocking the poster: see SECURITY-FINDINGS.md, finding F8.
    */
   Session(const std::shared_ptr<Pinger>& pinger = nullptr,
-          std::chrono::milliseconds idleTimeout = std::chrono::milliseconds::zero());
+          std::chrono::milliseconds idleTimeout = std::chrono::milliseconds::zero(),
+          v_uint32 maxQueuedEvents = EventStream::DefaultMaxQueueSize);
 
   ~Session();
 
+  /** Messages on their way <i>to</i> the session's listener. */
   std::shared_ptr<EventStream> getInStream();
+
+  /** Messages on their way from the session back to the client. */
   std::shared_ptr<EventStream> getOutStream();
 
   /**

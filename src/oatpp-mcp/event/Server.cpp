@@ -51,7 +51,9 @@ std::shared_ptr<Session> Server::startNewSession(const std::shared_ptr<Session::
     }
 
     session = std::make_shared<Session>(
-      m_pinger, std::chrono::milliseconds(m_config.sessionIdleTimeoutMillis));
+      m_pinger,
+      std::chrono::milliseconds(m_config.sessionIdleTimeoutMillis),
+      m_config.maxQueuedEvents);
 
     if(m_sessions.find(session->getId()) != m_sessions.end()) {
       /* Identifiers are random 122-bit values, so this is not a race to be handled - it is the

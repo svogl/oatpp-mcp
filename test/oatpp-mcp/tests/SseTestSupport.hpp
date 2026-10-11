@@ -211,8 +211,12 @@ public:
      * on the outbound stream, the session on the inbound one. Closing the sessions is what releases
      * the writer; without it this destructor waits for threads that are waiting for a client that has
      * already gone. (That is finding F5, and it is why it is worth fixing.)
+     *
+     * Waiting for the registry to empty afterwards is what makes the object-leak check meaningful:
+     * a session still running holds its queues, and its queues hold messages.
      */
     eventServer->closeSessions();
+    waitUntilEmpty(3000);
     server->stop();
     if(thread.joinable()) {
       thread.join();

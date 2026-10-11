@@ -98,13 +98,30 @@ void Server::stdioListen() {
       event::Event e;
       e.name = "stdio";
       e.data = line;
-      session->getInStream()->post(e);
+      if(!event::isQueued(session->getInStream()->post(e))) {
+        /*
+         * A message read from this process's own stdin and then thrown away. There is nothing to
+         * retry and nobody to tell - the client is waiting for an answer to a call that no longer
+         * exists - so the only thing left to do is say so.
+         */
+        OATPP_LOGe("[oatpp::mcp::Server::stdioListen()]",
+                   "Error - inbound message dropped; a client is waiting for an answer that will not come")
+      }
     }
   });
 
   std::thread tout([session]{
-    while (session->isOpen()) {
+    /*
+     * Read until the stream is closed <i>and empty</i>, and only then stop. The loop used to test
+     * `isOpen()` and then dereference whatever `read()` returned - and `read()` returns nothing at
+     * all precisely when the stream has been closed, which is the other way this loop ends. That is
+     * a null `oatpp::String` printed to stdout, on every clean shutdown.
+     */
+    for(;;) {
       auto e = session->getOutStream()->read(std::chrono::milliseconds(0) /* wait until event */ );
+      if(!e) {
+        break;
+      }
       std::cout << *e.data << std::endl;
     }
   });

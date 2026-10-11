@@ -44,6 +44,21 @@ public:
      */
     v_int64 sessionIdleTimeoutMillis = 0;
 
+    /**
+     * Most events to queue per session and per direction (inbound messages, outbound replies);
+     * <code>0</code> means no limit.
+     *
+     * This is the memory bound of an idle or a stalled client: every queued event is a whole message
+     * held for somebody who is not reading it. Refusing is loud - the poster is told, the stream
+     * counts it, and <code>POST /sessions/{id}</code> answers 503 rather than pretending to have
+     * accepted the message - see SECURITY-FINDINGS.md, finding F8.
+     *
+     * Raise it for a client that legitimately pipelines a great many calls while it is not reading
+     * its own event stream; leave it alone otherwise, and treat a nonzero drop counter as a client
+     * or a proxy to go and look at.
+     */
+    v_uint32 maxQueuedEvents = EventStream::DefaultMaxQueueSize;
+
   };
 
 private:

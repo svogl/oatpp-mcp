@@ -74,10 +74,12 @@ set(MCP_TESTS
         AccessGuardTest
         UuidTest
         SessionIdTest
+        EventStreamTest
         ListenerMessageTest
         ToolHttpFramingTest
         ToolLoggingTest
         SseAccessTest
+        SseBackpressureTest
 )
 
 set(MCP_TEST_SOURCES
