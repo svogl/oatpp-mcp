@@ -1,5 +1,6 @@
 #include "ToolLoggingTest.hpp"
 
+#include "LogCapture.hpp"
 #include "TestChecks.hpp"
 
 #include "oatpp-mcp/utils/LogSafe.hpp"
@@ -18,108 +19,17 @@ using oatpp::mcp::utils::LogSafe;
 
 namespace {
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// A logger that keeps what it was told instead of printing it
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+using oatpp::mcp::test::CapturingLogger;
+using oatpp::mcp::test::Record;
+using oatpp::mcp::test::ScopedLogger;
+using oatpp::mcp::test::atPriority;
+using oatpp::mcp::test::describe;
+using oatpp::mcp::test::isSingleLine;
+using oatpp::mcp::test::transcript;
+using oatpp::mcp::test::withTag;
 
-struct Record {
-  v_uint32 priority;
-  std::string tag;
-  std::string message;
-};
-
-/**
- * Everything the process logs while it is installed. `oatpp::Environment::log()` hands every
- * message to the logger and filtering by level happens inside the logger itself, so capturing
- * means saying yes to all priorities - which is also what makes "was this info or debug?" a
- * question this test can answer rather than one it has to infer.
- */
-class CapturingLogger : public oatpp::Logger {
-private:
-  std::mutex m_mutex;
-  std::vector<Record> m_records;
-public:
-
-  void log(v_uint32 priority, const std::string& tag, const std::string& message) override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_records.push_back(Record{priority, tag, message});
-  }
-
-  bool isLogPriorityEnabled(v_uint32) override {
-    return true;
-  }
-
-  std::vector<Record> records() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_records;
-  }
-
-};
-
-/** Installs a logger for the duration of a scope and puts back whatever was there before. */
-class ScopedLogger {
-private:
-  std::shared_ptr<oatpp::Logger> m_previous;
-public:
-
-  explicit ScopedLogger(const std::shared_ptr<oatpp::Logger>& logger)
-    : m_previous(oatpp::Environment::getLogger())
-  {
-    oatpp::Environment::setLogger(logger);
-  }
-
-  ~ScopedLogger() {
-    oatpp::Environment::setLogger(m_previous);
-  }
-
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Helpers
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/** Records this test caused - other tests' threads may still be logging into the capture. */
-std::vector<Record> withTag(const std::vector<Record>& records, const std::string& tag) {
-  std::vector<Record> result;
-  for(auto& r : records) {
-    if(r.tag == tag) {
-      result.push_back(r);
-    }
-  }
-  return result;
-}
-
-std::vector<Record> atPriority(const std::vector<Record>& records, v_uint32 priority) {
-  std::vector<Record> result;
-  for(auto& r : records) {
-    if(r.priority == priority) {
-      result.push_back(r);
-    }
-  }
-  return result;
-}
-
-/** Everything that was said, as one string - what "nowhere in the log" is checked against. */
-std::string transcript(const std::vector<Record>& records) {
-  std::string out;
-  for(auto& r : records) {
-    out += r.message;
-    out += "|";
-  }
-  return out;
-}
-
-std::string describe(const std::vector<Record>& records) {
-  std::string out;
-  for(auto& r : records) {
-    out += "\n  p" + std::to_string(r.priority) + " '" + escape(r.message) + "'";
-  }
-  return out;
-}
-
-bool isSingleLine(const std::string& message) {
-  return message.find('\n') == std::string::npos && message.find('\r') == std::string::npos;
-}
+/* The capture itself lives in LogCapture.hpp - the logger is a process-wide object, so there is
+   exactly one implementation of it worth having. */
 
 /* Distinct from the unit test's own tag: these are records this test caused, not records about it. */
 const char* const kTag = "TEST[mcp::ToolLogging::captured]";

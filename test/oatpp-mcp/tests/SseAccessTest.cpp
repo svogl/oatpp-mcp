@@ -1,203 +1,23 @@
 #include "SseAccessTest.hpp"
 
+#include "SseTestSupport.hpp"
 #include "TestChecks.hpp"
 
-#include "oatpp-mcp/event/Server.hpp"
-#include "oatpp-mcp/sse/Controller.hpp"
-#include "oatpp-mcp/utils/AccessGuard.hpp"
-
-#include "oatpp/json/ObjectMapper.hpp"
-#include "oatpp/web/client/HttpRequestExecutor.hpp"
-#include "oatpp/web/mime/ContentMappers.hpp"
-#include "oatpp/web/protocol/http/outgoing/BufferBody.hpp"
-#include "oatpp/web/server/HttpConnectionHandler.hpp"
-#include "oatpp/web/server/HttpRouter.hpp"
-#include "oatpp/network/Server.hpp"
-#include "oatpp/network/tcp/client/ConnectionProvider.hpp"
-#include "oatpp/network/tcp/server/ConnectionProvider.hpp"
-
-#include <chrono>
-#include <memory>
-#include <mutex>
-#include <stdexcept>
-#include <string>
-#include <thread>
-#include <utility>
-#include <vector>
-
 using oatpp::mcp::test::Checks;
+using oatpp::mcp::test::localOnly;
+using oatpp::mcp::test::send;
 using oatpp::mcp::test::str;
+using oatpp::mcp::test::waitFor;
+
+/*
+ * The server, the socket and the recording listener are shared with SseBackpressureTest - see
+ * SseTestSupport.hpp. The name stays: every case below reads as "a fixture, a request, an answer".
+ */
+using Fixture = oatpp::mcp::test::SseFixture;
 
 namespace {
 
-using Response = oatpp::web::protocol::http::incoming::Response;
-using HeaderList = std::vector<std::pair<std::string, std::string>>;
-
-/**
- * Records what a session was handed.
- *
- * Not the real <code>Listener</code>, and not a read of the session's own in-stream: a session that
- * is registered is being listened to by its own thread, which consumes the stream before a test can.
- * Delivery is therefore asserted on the listener, which is where it matters anyway - and which is
- * the only way to assert that something did <i>not</i> arrive.
- */
-class RecordingListener : public oatpp::mcp::event::Session::EventListener {
-private:
-  std::mutex m_mutex;
-  std::string m_last;
-  v_int32 m_count = 0;
-public:
-
-  void onEvent(oatpp::mcp::event::Session&, const oatpp::mcp::event::Event& event) override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_last = str(event.data);
-    m_count ++;
-  }
-
-  v_int32 count() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_count;
-  }
-
-  std::string last() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_last;
-  }
-
-};
-
-/**
- * One HTTP request, and the response that came back with it.
- *
- * The response object is what holds the connection open: an SSE response never completes, so a test
- * that wants its session to stay alive has to keep the returned pointer alive, and a test that wants
- * it to die has to let go of it.
- */
-static std::shared_ptr<Response> send(v_uint16 port,
-                                      const char* method,
-                                      const char* path,
-                                      const HeaderList& headers = HeaderList(),
-                                      const std::string& body = std::string())
-{
-  auto provider = std::make_shared<oatpp::network::tcp::client::ConnectionProvider>(
-    oatpp::network::Address("127.0.0.1", port, oatpp::network::Address::IP_4));
-  oatpp::web::client::HttpRequestExecutor executor(provider);
-
-  oatpp::web::protocol::http::Headers h;
-  for(const auto& header : headers) {
-    h.put(oatpp::String(header.first), oatpp::String(header.second));
-  }
-
-  std::shared_ptr<oatpp::web::protocol::http::outgoing::Body> outBody;
-  if(!body.empty()) {
-    outBody = std::make_shared<oatpp::web::protocol::http::outgoing::BufferBody>(
-      oatpp::String(body), "application/json");
-  }
-
-  return executor.execute(oatpp::String(method), oatpp::String(path), h, outBody, nullptr);
-}
-
-/**
- * An MCP-over-SSE server on 127.0.0.1, configured per test.
- *
- * A real socket rather than a unit-level call into the controller, because the finding is about what
- * an unauthenticated remote client can do - and because "the endpoint never asked the guard" is
- * invisible to a test that does not send a request.
- */
-class Fixture {
-public:
-  std::shared_ptr<oatpp::mcp::event::Server> eventServer;
-  std::shared_ptr<RecordingListener> recorder;
-  v_uint16 port = 0;
-private:
-  std::shared_ptr<oatpp::network::Server> server;
-  std::thread thread;
-public:
-
-  Fixture(const oatpp::mcp::utils::AccessGuard::Config& access,
-          const oatpp::mcp::event::Server::Config& sessions = oatpp::mcp::event::Server::Config())
-  {
-    recorder = std::make_shared<RecordingListener>();
-    eventServer = std::make_shared<oatpp::mcp::event::Server>(nullptr, sessions);
-
-    auto json = std::make_shared<oatpp::json::ObjectMapper>();
-    auto mappers = std::make_shared<oatpp::web::mime::ContentMappers>();
-    mappers->putMapper(json);
-
-    auto controller = std::make_shared<oatpp::mcp::sse::Controller>(
-      eventServer, recorder, mappers, "mcp/", access);
-
-    auto router = oatpp::web::server::HttpRouter::createShared();
-    router->addController(controller);
-
-    std::shared_ptr<oatpp::network::tcp::server::ConnectionProvider> provider;
-    std::string failures;
-    for(v_uint32 candidate = 3131; candidate < 3161 && provider == nullptr; candidate++) {
-      try {
-        provider = oatpp::network::tcp::server::ConnectionProvider::createShared(
-          {"127.0.0.1", static_cast<v_uint16>(candidate), oatpp::network::Address::IP_4});
-        port = static_cast<v_uint16>(candidate);
-      } catch (const std::exception& e) {
-        failures += e.what();
-        failures += "; ";
-      }
-    }
-    if(provider == nullptr) {
-      throw std::runtime_error("could not bind a port for the test server: " + failures);
-    }
-
-    auto handler = oatpp::web::server::HttpConnectionHandler::createShared(router);
-    server = std::make_shared<oatpp::network::Server>(provider, handler);
-    thread = std::thread([this] { server->run(); });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(150)); // let it start accepting
-  }
-
-  ~Fixture() {
-    /*
-     * Every SSE connection holds a session thread and a connection thread, both parked - the writer
-     * on the outbound stream, the session on the inbound one. Closing the sessions is what releases
-     * the writer; without it this destructor waits for threads that are waiting for a client that has
-     * already gone. (That is finding F5, and it is why it is worth fixing.)
-     */
-    eventServer->closeSessions();
-    server->stop();
-    if(thread.joinable()) {
-      thread.join();
-    }
-  }
-
-  /** Wait until the registry is empty, or give up. */
-  bool waitUntilEmpty(v_int32 timeoutMillis) {
-    for(v_int32 waited = 0; waited < timeoutMillis; waited += 20) {
-      if(eventServer->sessionCount() == 0) {
-        return true;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return eventServer->sessionCount() == 0;
-  }
-
-};
-
-/** A server that only accepts the address it is bound to - the recommended local configuration. */
-static oatpp::mcp::utils::AccessGuard::Config localOnly() {
-  oatpp::mcp::utils::AccessGuard::Config config;
-  config.allowedHosts.push_back("127.0.0.1");
-  return config;
-}
-
-/** Wait for a condition that is true on a thread other than this one. */
-template<class Predicate>
-static bool waitFor(Predicate predicate, v_int32 timeoutMillis) {
-  for(v_int32 waited = 0; waited < timeoutMillis; waited += 20) {
-    if(predicate()) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  }
-  return predicate();
-}
+using oatpp::mcp::test::HeaderList;
 
 }
 

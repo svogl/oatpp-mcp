@@ -8,7 +8,9 @@
 #include "oatpp/base/Log.hpp"
 #include "oatpp/Types.hpp"
 
+#include <chrono>
 #include <string>
+#include <thread>
 
 namespace oatpp { namespace mcp { namespace test {
 
@@ -73,6 +75,24 @@ public:
   }
 
 };
+
+/**
+ * Wait for a condition that becomes true on another thread.
+ *
+ * Polls, because every condition here is an "eventually", and re-reads the predicate once more after
+ * the deadline so that the caller can put the result straight into a check without a second read
+ * racing with the timeout.
+ */
+template<class Predicate>
+static bool waitFor(Predicate predicate, v_int32 timeoutMillis, v_int32 stepMillis = 20) {
+  for(v_int32 waited = 0; waited < timeoutMillis; waited += stepMillis) {
+    if(predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(stepMillis));
+  }
+  return predicate();
+}
 
 /**
  * Printable form of an `oatpp::String`, with `nullptr` made visible instead of crashing the test
