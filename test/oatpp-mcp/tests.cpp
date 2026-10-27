@@ -11,6 +11,7 @@
 // place to look when it does.
 //
 
+#include "oatpp-mcp/tests/HttpSanitizeTest.hpp"
 #include "oatpp-mcp/tests/ListenerMessageTest.hpp"
 #include "oatpp-mcp/tests/SessionIdTest.hpp"
 #include "oatpp-mcp/tests/ToolHttpFramingTest.hpp"
@@ -41,6 +42,14 @@ public:
  */
 static std::vector<TestDescriptor> tests() {
   return {
+    TestDescriptor{
+      "HttpSanitizeTest",
+      "TEST[mcp::HttpSanitize]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::HttpSanitizeTest>()); }
+    },
     TestDescriptor{
       "SessionIdTest",
       "TEST[mcp::SessionId]",

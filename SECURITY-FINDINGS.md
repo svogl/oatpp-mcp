@@ -11,7 +11,7 @@ by running the code, not by reading it.
 
 | ID | Finding | Severity | Status | Test |
 |----|---------|----------|--------|------|
-| [F1](#f1--request-smuggling-via-tool-arguments) | Request smuggling via tool arguments | High | **open — reproduced** | `ToolHttpFramingTest` |
+| [F1](#f1--request-smuggling-via-tool-arguments) | Request smuggling via tool arguments | High | **fixed** | `HttpSanitizeTest`, `ToolHttpFramingTest` |
 | [F2](#f2--session-identifiers-are-heap-addresses) | Session identifiers are heap addresses | High | **open — reproduced** | `SessionIdTest` |
 | [F3](#f3--remote-denial-of-service-on-malformed-messages) | Remote DoS on malformed messages | High | **open — reproduced** | `ListenerMessageTest` |
 | [F4](#f4--no-origin-host-or-peer-validation-on-the-sse-endpoints) | No Origin/Host/peer validation on the SSE endpoints | Medium | open | — |
@@ -23,6 +23,13 @@ by running the code, not by reading it.
 | [F10](#f10--no-body-size-limit-and-no-rate-limiting) | No body size limit, no rate limiting | Low | open | — |
 
 F1, F2 and F3 were reported by an external disclosure. F4–F10 were found while verifying them.
+
+**Consequence of F1's fix that upstream should know about:** oatpp never percent-decodes a URL.
+`Url::Parser::parseQueryParams()` and the router's path-variable labels hand the endpoint the raw
+bytes, and `oatpp::encoding::Url::decode()` is not called from anywhere in the library. An endpoint
+therefore receives `hello%20world` where the tool caller meant `hello world`. Nothing that worked
+before regresses — a value containing a space used to produce a malformed request line — but the
+correct end state needs the server side to decode as well. Tracked as **B6** below.
 
 ## Running the tests
 
@@ -83,18 +90,32 @@ requires one and answers 400, so that exact payload does not split a request her
 accident of this upstream parser, not a defence: the payload above needs no parser bug and works
 today, and a deployment whose tool upstream is a real HTTP server or a proxy has no such luck.
 
-**Fix.** Encode at the boundary, in `EndpointTool`:
+**Fix — landed.** `src/oatpp-mcp/utils/HttpSanitize.{hpp,cpp}`, used from `EndpointTool`:
 
-- percent-encode path variables and query names/values (`oatpp::encoding::Url` with an explicit
-  config; path segments must not keep `/`, `?` or `#`);
-- **reject** — not strip — CR, LF and NUL in header names and values. Stripping is bypassable and
-  silently changes the intended header;
-- treat every argument as raw: `a%20b` becomes `a%2520b`. Assuming pre-encoded input is unsound;
-- fail as a tool error (`isError = true`), which `Listener::toolsCall` already turns into a proper
-  MCP error response.
+| value | rule | why |
+|---|---|---|
+| path variable | percent-encoded (`encodePathSegment`) | encoding is lossless; the upstream gets what the caller meant |
+| query name and value | percent-encoded (`encodeQueryComponent`) | same |
+| header name, header value | **rejected** if not RFC 9110 `tchar` / `field-value` | there is no encoding for a header; stripping CR/LF would silently send a different header |
+| assembled request target | final CR/LF/NUL guard (`validateRequestTarget`) | cheap insurance; fires only on a malformed endpoint pattern |
+| body | unchanged | already serialized by a mapper; `ToolHttpFramingTest` pins this |
+
+- The encoded set is RFC 3986 unreserved plus `!'()*`; everything else — including `%`, `/`, `?`,
+  `#`, `&`, `=`, `+` and every control character — becomes `%XX`.
+- **Input is always treated as raw**: `a%20b` becomes `a%2520b`. There is no sound way to tell a
+  pre-encoded value from a literal one, so the distinction is not offered.
+- Path variables are encoded before `Pattern::reconstruct()` is called, so the module does not
+  depend on a base-project change; `reconstructEncoded()` (B3) is still worth having upstream.
+- A rejected header throws `std::invalid_argument`, which `Listener::toolsCall` already turns into
+  an MCP tool error.
+
+Verified end-to-end against the demo server: the payload above now sends
+`?searchPhrase=x%20HTTP%2F1.1%0D%0A…` and only `UserController:getUsers` runs. Legitimate calls are
+unaffected — `getUserById(42)` still returns the user, and a search phrase containing spaces, `&`,
+`=` and `%` now produces a well-formed request where it previously produced a truncated one.
 
 Defence in depth belongs in oatpp itself (reject CR/LF when serializing a request target and
-headers, and add an encoding variant of `Pattern::reconstruct()`); see the base-project PR.
+headers; add `Pattern::reconstructEncoded()`; decode what was encoded — B6); see below.
 
 ---
 
@@ -201,15 +222,25 @@ truncate, and escape control characters.
 **Where:** `src/oatpp-mcp/utils/ApiBridge.cpp`.
 
 `run()` creates two `oatpp::network::Server`s on the stack and joins them; the threads capture
-`this`, so the object can neither be destroyed nor shut down. Consequences: it is untestable without
-leaking it (`ToolHttpFramingTest` runs with the object-leak check disabled for this reason — see
-`test/oatpp-mcp/tests.cpp`), and embedding an MCP server in an application that wants a clean
-shutdown is not possible. The async half is also dead: `m_asyncConnectionHandler` is built with
+`this`, so the object can neither be destroyed nor shut down.
+
+**Destroying an `ApiBridge` aborts the process.** Its constructor creates an
+`oatpp::async::Executor`, and `Executor::~Executor() = default` (`oatpp/async/Executor.hpp`) while
+its workers still own joinable `std::thread`s — so `~ApiBridge` destroys a joinable thread:
+
+```
+terminate called without an active exception
+```
+
+This is what `ToolHttpFramingTest` hit first; the fixture is now deliberately leaked, with the
+reason in the code, and the object-leak check for that test is disabled in the runner
+(`test/oatpp-mcp/tests.cpp`). Embedding an MCP server in an application that wants a clean shutdown
+is not possible either. The async half is also dead: `m_asyncConnectionHandler` is built with
 `m_router` instead of `m_asyncRouter`, and the second thread body in `run()` never calls
 `server.run()`, so `getAsyncHttpExecutor()` returns an executor with no server behind it.
 
-**Fix:** hold the servers as members, add `stop()`, and either wire the async router properly or
-remove the async accessors until they work.
+**Fix:** hold the servers as members, add `stop()` (stopping the executor and the interface too),
+and either wire the async router properly or remove the async accessors until they work.
 
 ## F8 — dropped events are silent
 
@@ -243,6 +274,8 @@ are the second line of defence.
 | B3 | add `Pattern::reconstructEncoded()`; leave `reconstruct()` alone so existing callers do not double-encode | `web/url/mapping/Pattern.{hpp,cpp}` |
 | B4 | `RequestHeadersReader::readHeadersSectionIterative()` sets the buffer position to the end of the peeked chunk instead of to the section end, so the header parse is handed bytes past `\r\n\r\n`. Benign today because `Parser::parseHeaders()` stops at the blank line | `web/protocol/http/incoming/RequestHeadersReader.cpp` |
 | B5 | a CSPRNG-backed UUID helper, so modules stop hand-rolling identifiers from `std::mt19937` | new `utils/Uuid.hpp` |
+| B6 | **percent-decode what was encoded.** `Url::Parser::parseQueryParams()` splits on `&`/`=` and hands out raw labels; path-variable labels are raw too; `encoding::Url::decode()` is never called anywhere in the library. A correctly-encoded request therefore delivers `%20` to the endpoint | `network/Url.cpp`, `web/protocol/http/incoming/Request.cpp` |
+| B7 | `Executor::~Executor() = default` while workers own joinable threads — destroying a stopped-but-not-joined executor is `std::terminate` | `async/Executor.hpp` |
 
 ## Conventions for the fix PRs
 

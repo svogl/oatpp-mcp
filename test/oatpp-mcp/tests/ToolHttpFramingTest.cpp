@@ -235,6 +235,32 @@ static bool failed(const oatpp::Object<oatpp::mcp::dto::ServerResultToolsCall>& 
   return !result || (result->isError != nullptr && *result->isError);
 }
 
+/**
+ * What came back from a tool call.
+ *
+ * `EndpointTool::call()` throws when it refuses an argument; in the MCP layer
+ * `Listener::toolsCall()` catches that and turns it into an error result. The tests call the tool
+ * directly, so both shapes have to be understood here.
+ */
+struct Outcome {
+  bool rejected = false;   ///< call() threw instead of sending the request
+  bool isError = false;    ///< a result came back with isError set
+  std::string detail;
+};
+
+static Outcome tryCall(Fixture& fixture, const std::string& toolName, const std::string& jsonArgs) {
+  Outcome outcome;
+  try {
+    auto result = fixture.call(toolName, jsonArgs);
+    outcome.isError = failed(result);
+    outcome.detail = "isError=" + std::string(outcome.isError ? "true" : "false");
+  } catch (const std::exception& e) {
+    outcome.rejected = true;
+    outcome.detail = e.what();
+  }
+  return outcome;
+}
+
 /** The request line of a second request, ending with the blank line that completes its headers. */
 static const std::string kSmuggledGetUser42 = "GET /users/42 HTTP/1.1\r\nX-Second: 2\r\n\r\n";
 
@@ -244,7 +270,16 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
 
   Checks checks("TEST[mcp::ToolHttpFraming]");
 
-  Fixture fixture;
+  /*
+   * Deliberately leaked - `new` with no matching `delete` is the point.
+   *
+   * An ApiBridge cannot be destroyed. Its constructor creates an oatpp::async::Executor whose
+   * destructor is `= default` while the worker threads are still joinable, so ~ApiBridge destroys a
+   * joinable std::thread and the process aborts ("terminate called without an active exception").
+   * Its server threads also capture `this`, so releasing it while they run would be a
+   * use-after-free even if the executor allowed it. See SECURITY-FINDINGS.md, F7.
+   */
+  auto& fixture = *(new Fixture());
 
   checks.check(fixture.tools.size() == 4,
                "the fixture exposes all four spy endpoints",
@@ -254,13 +289,14 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
   {
     fixture.spy->reset();
 
-    auto result = fixture.call("getUsers",
+    auto outcome = tryCall(fixture, "getUsers",
       "{\"offset\":\"1\",\"limit\":\"1\",\"searchPhrase\":\"hello\"}");
     settle();
 
     checks.check(fixture.spy->getUsersCalls == 1, "control: the requested endpoint ran once");
     checks.check(fixture.spy->getUserByIdCalls == 0, "control: no other endpoint ran");
-    checks.check(!failed(result), "control: the tool call succeeded");
+    checks.check(!outcome.rejected && !outcome.isError, "control: the tool call succeeded",
+                 outcome.detail);
   }
 
   /*--- 2. request smuggling through a query parameter --------------------------------*/
@@ -274,7 +310,7 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
      */
     std::string injection = "x HTTP/1.1\r\nX-Injected: 1\r\n\r\n" + kSmuggledGetUser42;
 
-    auto result = fixture.call("getUsers",
+    auto outcome = tryCall(fixture, "getUsers",
       "{\"offset\":\"1\",\"limit\":\"1\",\"searchPhrase\":" + jsonString(injection) + "}");
     settle();
 
@@ -283,8 +319,9 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
                  "upstream saw userIds = " + describe(fixture.spy->seenUserIds()));
     checks.check(fixture.spy->getUsersCalls == 1,
                  "the requested endpoint still ran exactly once");
-    checks.check(!failed(result),
-                 "the call is still answered (the injection is encoded, not dropped)");
+    checks.check(!outcome.rejected && !outcome.isError,
+                 "the call is still answered - the injection is encoded, not dropped",
+                 outcome.detail);
   }
 
   /*--- 3. request smuggling through a path variable ----------------------------------*/
@@ -293,7 +330,7 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
 
     std::string injection = "1 HTTP/1.1\r\nX-Injected: 1\r\n\r\n" + kSmuggledGetUser42;
 
-    fixture.call("getUserById", "{\"userId\":" + jsonString(injection) + "}");
+    tryCall(fixture, "getUserById", "{\"userId\":" + jsonString(injection) + "}");
     settle();
 
     auto seen = fixture.spy->seenUserIds();
@@ -309,24 +346,36 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
   {
     fixture.spy->reset();
 
-    fixture.call("headered", "{\"xTest\":" + jsonString("v\r\nX-Injected: pwned") + "}");
+    auto outcome = tryCall(fixture, "headered",
+      "{\"xTest\":" + jsonString("v\r\nX-Injected: pwned") + "}");
     settle();
 
     checks.check(!fixture.spy->sawInjectedHeader(),
                  "a header argument cannot add a header of its own",
                  "upstream saw X-Injected: '" + escape(fixture.spy->injectedHeaderValue()) + "'");
+
+    /*
+     * Policy, not just safety: a header cannot be percent-encoded the way a URL value can, so the
+     * call is refused outright rather than sent with a mangled value. If that policy ever changes,
+     * this check is where it will be noticed.
+     */
+    checks.check(outcome.rejected, "the call is refused rather than sent with a mangled header",
+                 outcome.detail);
+    checks.check(fixture.spy->headeredCalls == 0, "nothing was sent to the upstream",
+                 "headeredCalls = " + std::to_string(fixture.spy->headeredCalls.load()));
   }
 
   /*--- 5. control: a normal header value still arrives -------------------------------*/
   {
     fixture.spy->reset();
 
-    auto result = fixture.call("headered", "{\"xTest\":\"bearer abc123\"}");
+    auto outcome = tryCall(fixture, "headered", "{\"xTest\":\"bearer abc123\"}");
     settle();
 
     checks.check(fixture.spy->headeredCalls == 1, "control: the endpoint ran once");
     checks.check(!fixture.spy->sawInjectedHeader(), "control: no header was injected");
-    checks.check(!failed(result), "control: the tool call succeeded");
+    checks.check(!outcome.rejected && !outcome.isError, "control: the tool call succeeded",
+                 outcome.detail);
   }
 
   /*--- 6. control: CR/LF inside a body value stays inside the body -------------------*/
@@ -337,7 +386,7 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
      * The body is the one argument that is already safe - it goes through a mapper, and framing is
      * Content-Length based. Pinned so that a "fix" which starts escaping bodies is noticed too.
      */
-    auto result = fixture.call("createUser",
+    auto outcome = tryCall(fixture, "createUser",
       "{\"body\":" + jsonString(std::string("{\"a\": 1}\r\n\r\nGET /users/42 HTTP/1.1\r\n\r\n")) + "}");
     settle();
 
@@ -345,7 +394,8 @@ void oatpp::mcp::test::ToolHttpFramingTest::onRun() {
     checks.check(!contains(fixture.spy->seenUserIds(), "42"),
                  "a body value cannot invoke another endpoint",
                  "upstream saw userIds = " + describe(fixture.spy->seenUserIds()));
-    checks.check(!failed(result), "control: the tool call succeeded");
+    checks.check(!outcome.rejected && !outcome.isError, "control: the tool call succeeded",
+                 outcome.detail);
   }
 
   checks.assertNoFailures();
