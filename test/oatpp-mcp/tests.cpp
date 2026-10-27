@@ -11,6 +11,9 @@
 // place to look when it does.
 //
 
+#include "oatpp-mcp/tests/ListenerMessageTest.hpp"
+#include "oatpp-mcp/tests/SessionIdTest.hpp"
+#include "oatpp-mcp/tests/ToolHttpFramingTest.hpp"
 
 #include "oatpp/Environment.hpp"
 #include "oatpp/base/Log.hpp"
@@ -37,7 +40,33 @@ public:
  * Tests of this module. Keep in sync with MCP_TESTS in test/CMakeLists.txt.
  */
 static std::vector<TestDescriptor> tests() {
-  return {};
+  return {
+    TestDescriptor{
+      "SessionIdTest",
+      "TEST[mcp::SessionId]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::SessionIdTest>()); }
+    },
+    TestDescriptor{
+      "ListenerMessageTest",
+      "TEST[mcp::ListenerMessage]",
+      true,
+      nullptr,
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::ListenerMessageTest>()); }
+    },
+    TestDescriptor{
+      "ToolHttpFramingTest",
+      "TEST[mcp::ToolHttpFraming]",
+      false,
+      "oatpp::mcp::utils::ApiBridge cannot be stopped - its server threads capture `this`, so the "
+      "bridge and the objects it owns outlive the test. See SECURITY-FINDINGS.md (F7).",
+      [] { return std::static_pointer_cast<oatpp::test::UnitTest>(
+        std::make_shared<oatpp::mcp::test::ToolHttpFramingTest>()); }
+    },
+  };
 }
 
 static int runOne(const TestDescriptor& test) {
